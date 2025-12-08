@@ -24,7 +24,7 @@ Notifications.setNotificationHandler({
 });
 
 export default function App() {
-    const [intervalMinutes, setIntervalMinutes] = useState(5);
+    const [intervalMinutes, setIntervalMinutes] = useState(15);
     const [isActive, setIsActive] = useState(false);
     const [isPaused, setIsPaused] = useState(false);
     const [sound, setSound] = useState(null);
@@ -36,6 +36,7 @@ export default function App() {
     const intervalRef = useRef(null);
     const notificationListener = useRef(null);
     const responseListener = useRef(null);
+    const handlePauseRef = useRef(null);
 
     useEffect(() => {
         // Initialisation : charger les paramètres puis configurer
@@ -168,21 +169,10 @@ export default function App() {
         }
     };
 
-    const playBeep = async () => {
-        try {
-            // Le son sera principalement joué via la notification
-            // Pour un son personnalisé, vous pouvez ajouter un fichier beep.wav dans assets/
-            // et utiliser: const { sound } = await Audio.Sound.createAsync(require('./assets/beep.wav'));
+    // Le son est maintenant joué directement via la notification persistante
+    // en passant playSound=true à showPersistentNotification()
 
-            // Pour l'instant, on utilise le son de notification système
-            // qui est déjà configuré dans la notification
-            console.log('Bip joué');
-        } catch (error) {
-            console.error('Erreur lors de la lecture du bip:', error);
-        }
-    };
-
-    const showPersistentNotification = async () => {
+    const showPersistentNotification = async (playSound = false) => {
         try {
             // Mettre à jour les actions de notification d'abord
             await updateNotificationWithActions();
@@ -192,7 +182,7 @@ export default function App() {
                 body: isPaused
                     ? 'Appuyez sur Reprendre pour continuer'
                     : `Prochain bip dans ${intervalMinutes} minute(s)`,
-                sound: !isPaused,
+                sound: playSound ? 'default' : false, // Jouer le son seulement si demandé (pour le bip)
                 priority: Notifications.AndroidNotificationPriority.HIGH,
                 sticky: true,
                 categoryIdentifier: 'REMINDER',
@@ -219,20 +209,43 @@ export default function App() {
                 };
             }
 
-            // Si une notification existe déjà, la mettre à jour au lieu d'en créer une nouvelle
+            // Utiliser un ID constant pour la notification persistante
+            const PERSISTENT_NOTIFICATION_ID = 'reminder-persistent';
+
+            // Supprimer toutes les notifications existantes avec cet identifier
+            try {
+                // Annuler toutes les notifications planifiées avec cet ID
+                await Notifications.cancelScheduledNotificationAsync(PERSISTENT_NOTIFICATION_ID);
+            } catch (error) {
+                // Ignorer si aucune notification n'existe
+            }
+
+            // Supprimer aussi la notification actuelle si elle existe
             if (notificationId) {
                 try {
-                    // Annuler l'ancienne notification
                     await Notifications.dismissNotificationAsync(notificationId);
                 } catch (error) {
                     // Ignorer si la notification n'existe plus
                 }
             }
 
-            // Créer une nouvelle notification avec le même ID conceptuel
+            // Supprimer toutes les notifications avec cet identifier (au cas où)
+            try {
+                const allNotifications = await Notifications.getAllScheduledNotificationsAsync();
+                for (const notif of allNotifications) {
+                    if (notif.identifier === PERSISTENT_NOTIFICATION_ID) {
+                        await Notifications.cancelScheduledNotificationAsync(notif.identifier);
+                    }
+                }
+            } catch (error) {
+                // Ignorer les erreurs
+            }
+
+            // Créer une seule notification persistante avec un ID constant
             const notification = await Notifications.scheduleNotificationAsync({
+                identifier: PERSISTENT_NOTIFICATION_ID,
                 content: notificationContent,
-                trigger: null, // Notification persistante
+                trigger: null, // Notification persistante (immédiate)
             });
 
             setNotificationId(notification);
@@ -273,43 +286,72 @@ export default function App() {
         if (isInDisabledHours()) {
             console.log('Dans les heures désactivées, attente...');
             // Afficher quand même la notification pour indiquer qu'on est en attente
-            await showPersistentNotification();
+            await showPersistentNotification(false);
             return;
         }
 
-        // Afficher la notification persistante
-        await showPersistentNotification();
+        // Afficher la notification persistante avec le premier bip
+        await showPersistentNotification(true);
 
-        // Jouer le premier bip immédiatement
-        playBeep();
-
-        // Programmer les bips suivants
+        // Programmer les bips suivants - la notification persistante sera mise à jour avec le son
         intervalRef.current = setInterval(async () => {
             if (!isPaused && !isInDisabledHours()) {
-                playBeep();
-                // Mettre à jour la notification
-                await showPersistentNotification();
+                // Mettre à jour la notification persistante avec le son (bip)
+                await showPersistentNotification(true);
             }
         }, intervalMinutes * 60 * 1000);
     };
 
-    const stopReminder = () => {
+    const stopReminder = async () => {
         if (intervalRef.current) {
             clearInterval(intervalRef.current);
             intervalRef.current = null;
         }
 
+        const PERSISTENT_NOTIFICATION_ID = 'reminder-persistent';
+
+        // Supprimer toutes les notifications persistantes
         if (notificationId) {
-            Notifications.dismissNotificationAsync(notificationId);
+            try {
+                await Notifications.dismissNotificationAsync(notificationId);
+            } catch (error) {
+                // Ignorer si la notification n'existe plus
+            }
             setNotificationId(null);
+        }
+
+        // Annuler toutes les notifications planifiées avec cet ID
+        try {
+            await Notifications.cancelScheduledNotificationAsync(PERSISTENT_NOTIFICATION_ID);
+        } catch (error) {
+            // Ignorer si aucune notification n'existe
+        }
+
+        // Supprimer toutes les notifications avec cet identifier
+        try {
+            const allNotifications = await Notifications.getAllScheduledNotificationsAsync();
+            for (const notif of allNotifications) {
+                if (notif.identifier === PERSISTENT_NOTIFICATION_ID) {
+                    await Notifications.cancelScheduledNotificationAsync(notif.identifier);
+                }
+            }
+        } catch (error) {
+            // Ignorer les erreurs
+        }
+
+        // Dismiss aussi au cas où
+        try {
+            await Notifications.dismissNotificationAsync(PERSISTENT_NOTIFICATION_ID);
+        } catch (error) {
+            // Ignorer si la notification n'existe plus
         }
     };
 
-    const handleToggle = () => {
+    const handleToggle = async () => {
         const newIsActive = !isActive;
         setIsActive(newIsActive);
         setIsPaused(false);
-        saveSettings();
+        await saveSettings();
     };
 
     const handlePause = async () => {
@@ -326,7 +368,8 @@ export default function App() {
 
         // Si on reprend, redémarrer immédiatement si nécessaire
         if (!newPausedState && isActive && !isInDisabledHours()) {
-            playBeep();
+            // Le son sera joué via la notification persistante
+            await showPersistentNotification(true);
         }
     };
 
@@ -341,9 +384,9 @@ export default function App() {
         }
     };
 
-    const handleDisableHoursChange = () => {
+    const handleDisableHoursChange = async () => {
         setIsDisabledHoursActive(!isDisabledHoursActive);
-        saveSettings();
+        await saveSettings();
     };
 
     return (
@@ -366,20 +409,23 @@ export default function App() {
                             thumbColor={isActive ? '#f5dd4b' : '#f4f3f4'}
                         />
                     </View>
-                </View>
-
-                {isActive && (
-                    <>
-                        <View style={styles.section}>
+                    {isActive && (
+                        <>
+                            <View style={styles.divider} />
                             <Text style={styles.label}>Intervalle (minutes)</Text>
                             <TextInput
                                 style={styles.input}
                                 value={intervalMinutes.toString()}
                                 onChangeText={handleIntervalChange}
                                 keyboardType="numeric"
-                                placeholder="5"
+                                placeholder="15"
                             />
-                        </View>
+                        </>
+                    )}
+                </View>
+
+                {isActive && (
+                    <>
 
                         <View style={styles.section}>
                             <View style={styles.switchContainer}>
@@ -391,40 +437,40 @@ export default function App() {
                                     thumbColor={isDisabledHoursActive ? '#f5dd4b' : '#f4f3f4'}
                                 />
                             </View>
+                            {isDisabledHoursActive && (
+                                <>
+                                    <View style={styles.divider} />
+                                    <Text style={styles.label}>Heure de début (désactivation)</Text>
+                                    <TextInput
+                                        style={styles.input}
+                                        value={disableStartHour.toString()}
+                                        onChangeText={(text) => {
+                                            const value = parseInt(text) || 0;
+                                            if (value >= 0 && value <= 23) {
+                                                setDisableStartHour(value);
+                                                saveSettings();
+                                            }
+                                        }}
+                                        keyboardType="numeric"
+                                        placeholder="22"
+                                    />
+                                    <Text style={styles.label}>Heure de fin (réactivation)</Text>
+                                    <TextInput
+                                        style={styles.input}
+                                        value={disableEndHour.toString()}
+                                        onChangeText={(text) => {
+                                            const value = parseInt(text) || 0;
+                                            if (value >= 0 && value <= 23) {
+                                                setDisableEndHour(value);
+                                                saveSettings();
+                                            }
+                                        }}
+                                        keyboardType="numeric"
+                                        placeholder="8"
+                                    />
+                                </>
+                            )}
                         </View>
-
-                        {isDisabledHoursActive && (
-                            <View style={styles.section}>
-                                <Text style={styles.label}>Heure de début (désactivation)</Text>
-                                <TextInput
-                                    style={styles.input}
-                                    value={disableStartHour.toString()}
-                                    onChangeText={(text) => {
-                                        const value = parseInt(text) || 0;
-                                        if (value >= 0 && value <= 23) {
-                                            setDisableStartHour(value);
-                                            saveSettings();
-                                        }
-                                    }}
-                                    keyboardType="numeric"
-                                    placeholder="22"
-                                />
-                                <Text style={styles.label}>Heure de fin (réactivation)</Text>
-                                <TextInput
-                                    style={styles.input}
-                                    value={disableEndHour.toString()}
-                                    onChangeText={(text) => {
-                                        const value = parseInt(text) || 0;
-                                        if (value >= 0 && value <= 23) {
-                                            setDisableEndHour(value);
-                                            saveSettings();
-                                        }
-                                    }}
-                                    keyboardType="numeric"
-                                    placeholder="8"
-                                />
-                            </View>
-                        )}
 
                         <View style={styles.section}>
                             <Text style={[styles.labelHint, { marginBottom: 10 }]}>
@@ -439,6 +485,10 @@ export default function App() {
                                 </Text>
                             </TouchableOpacity>
                         </View>
+
+                        <Text style={styles.autoSaveHint}>
+                            💾 Tous les paramètres sont sauvegardés automatiquement
+                        </Text>
 
                         <View style={styles.statusContainer}>
                             <Text style={styles.statusText}>
@@ -470,8 +520,15 @@ const styles = StyleSheet.create({
         fontSize: 28,
         fontWeight: 'bold',
         textAlign: 'center',
-        marginBottom: 30,
+        marginBottom: 10,
         color: '#333',
+    },
+    autoSaveHint: {
+        fontSize: 12,
+        textAlign: 'center',
+        color: '#666',
+        marginBottom: 10,
+        fontStyle: 'italic',
     },
     section: {
         backgroundColor: '#fff',
@@ -504,6 +561,11 @@ const styles = StyleSheet.create({
         color: '#666',
         marginTop: 2,
         fontStyle: 'italic',
+    },
+    divider: {
+        height: 1,
+        backgroundColor: '#e0e0e0',
+        marginVertical: 15,
     },
     input: {
         borderWidth: 1,
