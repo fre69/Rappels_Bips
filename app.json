@@ -1,0 +1,48 @@
+{
+    "expo": {
+        "name": "Rappels Bips",
+        "slug": "rappels-bips",
+        "version": "1.0.0",
+        "orientation": "portrait",
+        "icon": "./assets/icon.png",
+        "userInterfaceStyle": "light",
+        "splash": {
+            "image": "./assets/splash.png",
+            "resizeMode": "contain",
+            "backgroundColor": "#4CAF50"
+        },
+        "assetBundlePatterns": [
+            "**/*"
+        ],
+        "ios": {
+            "supportsTablet": true,
+            "bundleIdentifier": "com.rappelsbips.app"
+        },
+        "android": {
+            "adaptiveIcon": {
+                "foregroundImage": "./assets/adaptive-icon.png",
+                "backgroundColor": "#4CAF50"
+            },
+            "package": "com.rappelsbips.app",
+            "permissions": [
+                "RECEIVE_BOOT_COMPLETED",
+                "VIBRATE",
+                "android.permission.RECEIVE_BOOT_COMPLETED",
+                "android.permission.VIBRATE"
+            ]
+        },
+        "web": {
+            "favicon": "./assets/favicon.png"
+        },
+        "plugins": [
+            [
+                "expo-notifications",
+                {
+                    "icon": "./assets/icon.png",
+                    "color": "#4CAF50"
+                }
+            ],
+            "expo-asset"
+        ]
+    }
+}

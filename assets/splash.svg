@@ -1,0 +1,9 @@
+<svg width="2048" height="2048" viewBox="0 0 2048 2048" xmlns="http://www.w3.org/2000/svg">
+  <rect width="2048" height="2048" fill="#4CAF50"/>
+  <circle cx="1024" cy="1024" r="400" fill="#FFFFFF" opacity="0.2"/>
+  <circle cx="1024" cy="1024" r="300" fill="#FFFFFF" opacity="0.3"/>
+  <circle cx="1024" cy="800" r="200" fill="#FFFFFF" opacity="0.9"/>
+  <circle cx="1024" cy="800" r="120" fill="#4CAF50"/>
+  <path d="M 1024 600 L 1024 800 L 1224 800" stroke="#FFFFFF" stroke-width="80" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <text x="1024" y="1300" font-family="Arial, sans-serif" font-size="120" font-weight="bold" fill="#FFFFFF" text-anchor="middle">Rappels Bips</text>
+</svg>
