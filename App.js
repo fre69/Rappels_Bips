@@ -70,28 +70,26 @@ export default function App() {
     const notificationListener = useRef(null);
     const responseListener = useRef(null);
     const handlePauseRef = useRef(null);
+    const wasActiveRef = useRef(false); // Pour suivre si le rappel était déjà actif avant un changement
 
     useEffect(() => {
         // Initialisation : charger les paramètres puis configurer
         const initialize = async () => {
             await loadSettings();
 
-            // Configurer le canal de notification Android
+            // Configurer le canal de notification Android (simplifié - le système gérera le son)
             if (Platform.OS === 'android') {
                 try {
-                    // Supprimer le canal s'il existe déjà (pour forcer la recréation avec les bons paramètres)
-                    // Note: sur Android, on ne peut pas vraiment supprimer un canal, mais on peut le recréer avec les bons paramètres
                     await Notifications.setNotificationChannelAsync('reminders', {
                         name: 'Rappels',
-                        description: 'Notifications de rappels avec bips sonores',
+                        description: 'Notifications de rappels',
                         importance: Notifications.AndroidImportance.HIGH,
                         vibrationPattern: [0, 250, 250, 250],
                         lightColor: '#FF231F7C',
-                        sound: 'default', // Définir le son par défaut dans le canal
                         enableVibrate: true,
                         showBadge: false,
                     });
-                    logWithTime('Canal de notification "Rappels" créé avec succès');
+                    logWithTime('Canal de notification "Rappels" créé');
                 } catch (error) {
                     logWithTime(`Erreur lors de la création du canal: ${error}`, 'error');
                 }
@@ -147,8 +145,12 @@ export default function App() {
 
     useEffect(() => {
         if (isActive && !isPaused) {
-            startReminder();
+            // Si le rappel était déjà actif, c'est juste un changement d'intervalle - ne pas jouer de son
+            const shouldPlaySound = !wasActiveRef.current;
+            wasActiveRef.current = true;
+            startReminder(shouldPlaySound);
         } else {
+            wasActiveRef.current = false;
             stopReminder();
         }
     }, [isActive, isPaused, intervalMinutes]);
@@ -264,16 +266,14 @@ export default function App() {
             notificationContent.categoryIdentifier = 'REMINDER';
 
             if (Platform.OS === 'android') {
-                // Sur Android, utiliser le canal (le son est défini dans le canal pour que l'utilisateur puisse le modifier)
+                // Sur Android, utiliser le canal (simplifié - le système gérera le son)
                 notificationContent.android = {
                     channelId: 'reminders',
                     priority: 'high',
                     sticky: true,
                     ongoing: true,
                     autoCancel: false,
-                    // Le son sera joué selon les paramètres du canal "Rappels" définis par l'utilisateur
                 };
-                logWithTime('Notification Android créée avec categoryIdentifier: REMINDER, channelId: reminders');
             } else {
                 // Sur iOS, utiliser le son standard
                 notificationContent.sound = playSound ? 'default' : false;
@@ -303,7 +303,7 @@ export default function App() {
                 setNotificationId(notification);
                 logWithTime(`Notification créée avec ID: ${notification}, categoryIdentifier: ${notificationContent.categoryIdentifier}`);
 
-                // Si on doit jouer le son, créer une notification sonore séparée
+                // Si on doit jouer le son, créer une notification sonore séparée (silencieuse visuellement)
                 if (playSound) {
                     try {
                         const soundNotificationId = `sound-${Date.now()}`;
@@ -316,6 +316,7 @@ export default function App() {
                                 android: {
                                     channelId: 'reminders',
                                     priority: 'high',
+                                    // Notification silencieuse visuellement mais avec son
                                 },
                                 sound: Platform.OS === 'ios' ? 'default' : undefined,
                             },
@@ -363,7 +364,7 @@ export default function App() {
 
     // Fonction scheduleNextBipNotification supprimée - on utilise maintenant BackgroundTimer
 
-    const startReminder = async () => {
+    const startReminder = async (playSound = true) => {
         // Annuler toutes les notifications de bip précédentes
         await cancelAllScheduledReminders();
 
@@ -375,8 +376,8 @@ export default function App() {
             return;
         }
 
-        // Afficher la notification persistante avec le premier bip
-        await showPersistentNotification(true);
+        // Afficher la notification persistante (avec ou sans son selon le contexte)
+        await showPersistentNotification(playSound);
 
         // Utiliser un timer pour mettre à jour la notification et jouer le son à intervalles réguliers
         // Ce timer fonctionne mieux en arrière-plan que les notifications programmées sur Android moderne
