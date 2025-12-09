@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import BackgroundTimer from 'react-native-background-timer';
 
 // Fonction helper pour les logs avec timestamp
 const logWithTime = (message, type = 'log') => {
@@ -99,16 +100,13 @@ export default function App() {
             // Demander les permissions de notification
             await registerForPushNotificationsAsync();
 
-            // Écouter les notifications reçues pour reprogrammer automatiquement
+            // Écouter les notifications reçues (pour logging uniquement maintenant)
             notificationListener.current = Notifications.addNotificationReceivedListener(
                 async (notification) => {
                     const data = notification.request.content.data;
                     if (data?.type === 'bip-sound') {
                         logWithTime('Bip sonore déclenché');
-                        // Reprogrammer le prochain bip si l'app est active
-                        if (isActive && !isPaused && !isInDisabledHours()) {
-                            await scheduleNextBipNotification();
-                        }
+                        // Le timer gère maintenant la programmation des bips
                     }
                 }
             );
@@ -140,7 +138,10 @@ export default function App() {
             if (responseListener.current) {
                 Notifications.removeNotificationSubscription(responseListener.current);
             }
-            // Les notifications programmées sont automatiquement annulées
+            // Arrêter le timer si il existe
+            if (intervalRef.current) {
+                BackgroundTimer.clearInterval(intervalRef.current);
+            }
         };
     }, []);
 
@@ -152,18 +153,21 @@ export default function App() {
         }
     }, [isActive, isPaused, intervalMinutes]);
 
-    // Reprogrammer les notifications quand l'app revient au premier plan
+    // Redémarrer le timer quand l'app revient au premier plan
     useEffect(() => {
         const subscription = AppState.addEventListener('change', async (nextAppState) => {
             if (nextAppState === 'active' && isActive && !isPaused) {
-                // Vérifier si une notification de bip est programmée
-                const scheduled = await Notifications.getAllScheduledNotificationsAsync();
-                const hasBipScheduled = scheduled.some(n => n.identifier === 'next-bip');
-
-                // Si aucune notification de bip n'est programmée, reprogrammer
-                if (!hasBipScheduled && isActive && !isPaused) {
-                    logWithTime('Aucune notification de bip programmée, reprogrammation');
-                    await scheduleNextBipNotification();
+                logWithTime('App revenue au premier plan - vérification du timer');
+                // Le timer devrait continuer à fonctionner, mais on peut le redémarrer pour être sûr
+                if (!intervalRef.current && isActive && !isPaused && !isInDisabledHours()) {
+                    const intervalMs = intervalMinutes * 60 * 1000;
+                    intervalRef.current = BackgroundTimer.setInterval(async () => {
+                        if (isActive && !isPaused && !isInDisabledHours()) {
+                            logWithTime('Timer déclenché - mise à jour notification et son');
+                            await showPersistentNotification(true);
+                        }
+                    }, intervalMs);
+                    logWithTime('Timer redémarré');
                 }
             }
         });
@@ -171,7 +175,7 @@ export default function App() {
         return () => {
             subscription.remove();
         };
-    }, [isActive, isPaused]);
+    }, [isActive, isPaused, intervalMinutes]);
 
     const loadSettings = async () => {
         try {
@@ -298,6 +302,37 @@ export default function App() {
 
                 setNotificationId(notification);
                 logWithTime(`Notification créée avec ID: ${notification}, categoryIdentifier: ${notificationContent.categoryIdentifier}`);
+
+                // Si on doit jouer le son, créer une notification sonore séparée
+                if (playSound) {
+                    try {
+                        const soundNotificationId = `sound-${Date.now()}`;
+                        await Notifications.scheduleNotificationAsync({
+                            identifier: soundNotificationId,
+                            content: {
+                                title: '',
+                                body: '',
+                                data: { type: 'bip-sound' },
+                                android: {
+                                    channelId: 'reminders',
+                                    priority: 'high',
+                                },
+                                sound: Platform.OS === 'ios' ? 'default' : undefined,
+                            },
+                            trigger: { seconds: 1 }, // 1 seconde pour jouer immédiatement
+                        });
+                        // Supprimer après le son
+                        setTimeout(async () => {
+                            try {
+                                await Notifications.dismissNotificationAsync(soundNotificationId);
+                                await Notifications.cancelScheduledNotificationAsync(soundNotificationId);
+                            } catch (e) { }
+                        }, 2000);
+                        logWithTime('Notification sonore programmée');
+                    } catch (soundError) {
+                        logWithTime(`Erreur lors de la notification sonore: ${soundError}`, 'error');
+                    }
+                }
             } catch (error) {
                 logWithTime(`Erreur lors de la création de la notification: ${error}`, 'error');
             }
@@ -326,47 +361,7 @@ export default function App() {
         }
     };
 
-    // Fonction pour programmer la prochaine notification de bip
-    // On programme une seule notification à la fois, puis on la reprogramme quand elle se déclenche
-    const scheduleNextBipNotification = async () => {
-        try {
-            // Calculer le délai en secondes jusqu'au prochain bip
-            const delaySeconds = intervalMinutes * 60;
-
-            // Annuler l'ancienne notification si elle existe
-            try {
-                await Notifications.cancelScheduledNotificationAsync('next-bip');
-            } catch (e) {
-                // Ignorer si elle n'existe pas
-            }
-
-            const now = new Date();
-            const nextBipTime = new Date(now.getTime() + delaySeconds * 1000);
-            logWithTime(`Programmation du prochain bip dans ${delaySeconds} secondes (${nextBipTime.toLocaleString('fr-FR')})`);
-
-            await Notifications.scheduleNotificationAsync({
-                identifier: 'next-bip',
-                content: {
-                    title: '', // Vide pour ne pas afficher de notification
-                    body: '', // Vide pour ne pas afficher de notification
-                    data: { type: 'bip-sound' },
-                    android: {
-                        channelId: 'reminders',
-                        priority: 'high',
-                        // Le son sera joué selon les paramètres du canal "Rappels"
-                    },
-                    sound: Platform.OS === 'ios' ? 'default' : undefined,
-                },
-                trigger: {
-                    seconds: delaySeconds, // Délai en secondes depuis maintenant
-                },
-            });
-
-            logWithTime(`Notification de bip programmée pour dans ${delaySeconds} secondes`);
-        } catch (error) {
-            logWithTime(`Erreur lors de la programmation du bip: ${error}`, 'error');
-        }
-    };
+    // Fonction scheduleNextBipNotification supprimée - on utilise maintenant BackgroundTimer
 
     const startReminder = async () => {
         // Annuler toutes les notifications de bip précédentes
@@ -380,38 +375,30 @@ export default function App() {
             return;
         }
 
-        // Afficher la notification persistante
-        await showPersistentNotification(false);
+        // Afficher la notification persistante avec le premier bip
+        await showPersistentNotification(true);
 
-        // Jouer le premier bip immédiatement
-        await playFirstBip();
+        // Utiliser un timer pour mettre à jour la notification et jouer le son à intervalles réguliers
+        // Ce timer fonctionne mieux en arrière-plan que les notifications programmées sur Android moderne
+        const intervalMs = intervalMinutes * 60 * 1000;
 
-        // Programmer le prochain bip (fonctionne même en arrière-plan)
-        await scheduleNextBipNotification();
-    };
-
-    // Jouer le premier bip immédiatement
-    const playFirstBip = async () => {
-        try {
-            await Notifications.scheduleNotificationAsync({
-                identifier: 'bip-immediate',
-                content: {
-                    title: '',
-                    body: '',
-                    data: { type: 'bip-sound' },
-                    android: {
-                        channelId: 'reminders',
-                        priority: 'high',
-                    },
-                    sound: Platform.OS === 'ios' ? 'default' : undefined,
-                },
-                trigger: { seconds: 1 }, // 1 seconde pour jouer immédiatement
-            });
-            logWithTime('Premier bip programmé');
-        } catch (error) {
-            logWithTime(`Erreur lors du premier bip: ${error}`, 'error');
+        // Arrêter le timer précédent s'il existe
+        if (intervalRef.current) {
+            BackgroundTimer.clearInterval(intervalRef.current);
         }
+
+        intervalRef.current = BackgroundTimer.setInterval(async () => {
+            if (isActive && !isPaused && !isInDisabledHours()) {
+                logWithTime('Timer déclenché - mise à jour notification et son');
+                // Mettre à jour la notification persistante avec son
+                await showPersistentNotification(true);
+            }
+        }, intervalMs);
+
+        logWithTime(`Timer en arrière-plan démarré: mise à jour toutes les ${intervalMinutes} minute(s)`);
     };
+
+    // Plus besoin de playFirstBip - le son est joué via showPersistentNotification(true)
 
     const cancelAllScheduledReminders = async () => {
         try {
@@ -421,17 +408,20 @@ export default function App() {
             } catch (error) {
                 // Ignorer si la notification n'existe pas
             }
-            // Annuler aussi le bip immédiat
-            try {
-                await Notifications.cancelScheduledNotificationAsync('bip-immediate');
-            } catch (error) { }
-            logWithTime('Toutes les notifications de bip annulées');
+            logWithTime('Notifications de bip annulées');
         } catch (error) {
             logWithTime(`Erreur lors de l'annulation des bips: ${error}`, 'error');
         }
     };
 
     const stopReminder = async () => {
+        // Arrêter le timer en arrière-plan
+        if (intervalRef.current) {
+            BackgroundTimer.clearInterval(intervalRef.current);
+            intervalRef.current = null;
+            logWithTime('Timer en arrière-plan arrêté');
+        }
+
         // Annuler toutes les notifications de bip
         await cancelAllScheduledReminders();
 
