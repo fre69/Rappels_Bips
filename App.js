@@ -9,21 +9,48 @@ import {
     ScrollView,
     Alert,
     Platform,
+    AppState,
 } from 'react-native';
 import * as Notifications from 'expo-notifications';
-import { Audio } from 'expo-av';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+
+// Fonction helper pour les logs avec timestamp
+const logWithTime = (message, type = 'log') => {
+    //Je veux l'heure sans la date
+    const timestamp = new Date().toLocaleTimeString('fr-FR', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+    });
+    const logMessage = `[${timestamp}] ${message}`;
+    if (type === 'error') {
+        console.error(logMessage);
+    } else {
+        console.log(logMessage);
+    }
+};
 
 // Configuration des notifications
 Notifications.setNotificationHandler({
     handleNotification: async (notification) => {
-        // Afficher toutes les notifications avec son
+        const data = notification.request.content.data;
+
+        // Si c'est une notification de bip, jouer le son mais ne pas l'afficher
+        if (data?.type === 'bip-sound') {
+            return {
+                shouldShowBanner: false, // Ne pas afficher dans la bannière
+                shouldShowList: false, // Ne pas afficher dans la liste
+                shouldPlaySound: true, // Jouer le son du canal "Rappels"
+                shouldSetBadge: false,
+            };
+        }
+
+        // Pour la notification permanente, afficher sans son (le son est joué séparément)
         return {
-            shouldShowAlert: true,
-            shouldPlaySound: true,
+            shouldShowBanner: true, // Afficher dans la bannière
+            shouldShowList: true, // Afficher dans la liste des notifications
+            shouldPlaySound: false, // Le son est géré par les notifications sound-only
             shouldSetBadge: false,
-            shouldShowBanner: true,
-            shouldShowList: true,
         };
     },
 });
@@ -32,7 +59,7 @@ export default function App() {
     const [intervalMinutes, setIntervalMinutes] = useState(15);
     const [isActive, setIsActive] = useState(false);
     const [isPaused, setIsPaused] = useState(false);
-    const [sound, setSound] = useState(null);
+    // sound state retiré - on utilise les notifications pour le son
     const [notificationId, setNotificationId] = useState(null);
     const [disableStartHour, setDisableStartHour] = useState(22);
     const [disableEndHour, setDisableEndHour] = useState(8);
@@ -63,21 +90,26 @@ export default function App() {
                         enableVibrate: true,
                         showBadge: false,
                     });
-                    console.log('Canal de notification "Rappels" créé avec succès');
+                    logWithTime('Canal de notification "Rappels" créé avec succès');
                 } catch (error) {
-                    console.error('Erreur lors de la création du canal:', error);
+                    logWithTime(`Erreur lors de la création du canal: ${error}`, 'error');
                 }
             }
 
             // Demander les permissions de notification
             await registerForPushNotificationsAsync();
 
-            // Écouter les notifications reçues
+            // Écouter les notifications reçues pour reprogrammer automatiquement
             notificationListener.current = Notifications.addNotificationReceivedListener(
                 async (notification) => {
-                    console.log('Notification reçue:', notification.request.identifier);
-                    // Les notifications de bip sont déjà programmées à l'avance
-                    // Pas besoin de programmer de nouvelles notifications ici
+                    const data = notification.request.content.data;
+                    if (data?.type === 'bip-sound') {
+                        logWithTime('Bip sonore déclenché');
+                        // Reprogrammer le prochain bip si l'app est active
+                        if (isActive && !isPaused && !isInDisabledHours()) {
+                            await scheduleNextBipNotification();
+                        }
+                    }
                 }
             );
 
@@ -108,12 +140,7 @@ export default function App() {
             if (responseListener.current) {
                 Notifications.removeNotificationSubscription(responseListener.current);
             }
-            if (intervalRef.current) {
-                clearInterval(intervalRef.current);
-            }
-            if (sound) {
-                sound.unloadAsync();
-            }
+            // Les notifications programmées sont automatiquement annulées
         };
     }, []);
 
@@ -124,6 +151,27 @@ export default function App() {
             stopReminder();
         }
     }, [isActive, isPaused, intervalMinutes]);
+
+    // Reprogrammer les notifications quand l'app revient au premier plan
+    useEffect(() => {
+        const subscription = AppState.addEventListener('change', async (nextAppState) => {
+            if (nextAppState === 'active' && isActive && !isPaused) {
+                // Vérifier si une notification de bip est programmée
+                const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+                const hasBipScheduled = scheduled.some(n => n.identifier === 'next-bip');
+
+                // Si aucune notification de bip n'est programmée, reprogrammer
+                if (!hasBipScheduled && isActive && !isPaused) {
+                    logWithTime('Aucune notification de bip programmée, reprogrammation');
+                    await scheduleNextBipNotification();
+                }
+            }
+        });
+
+        return () => {
+            subscription.remove();
+        };
+    }, [isActive, isPaused]);
 
     const loadSettings = async () => {
         try {
@@ -141,7 +189,7 @@ export default function App() {
             if (savedDisableEnd) setDisableEndHour(parseInt(savedDisableEnd));
             if (savedIsDisabledHoursActive === 'true') setIsDisabledHoursActive(true);
         } catch (error) {
-            console.error('Erreur lors du chargement des paramètres:', error);
+            logWithTime(`Erreur lors du chargement des paramètres: ${error}`, 'error');
         }
     };
 
@@ -154,7 +202,7 @@ export default function App() {
             await AsyncStorage.setItem('disableEndHour', disableEndHour.toString());
             await AsyncStorage.setItem('isDisabledHoursActive', isDisabledHoursActive.toString());
         } catch (error) {
-            console.error('Erreur lors de la sauvegarde des paramètres:', error);
+            logWithTime(`Erreur lors de la sauvegarde des paramètres: ${error}`, 'error');
         }
     };
 
@@ -221,7 +269,7 @@ export default function App() {
                     autoCancel: false,
                     // Le son sera joué selon les paramètres du canal "Rappels" définis par l'utilisateur
                 };
-                console.log('Notification Android créée avec categoryIdentifier: REMINDER, channelId: reminders');
+                logWithTime('Notification Android créée avec categoryIdentifier: REMINDER, channelId: reminders');
             } else {
                 // Sur iOS, utiliser le son standard
                 notificationContent.sound = playSound ? 'default' : false;
@@ -249,12 +297,12 @@ export default function App() {
                 });
 
                 setNotificationId(notification);
-                console.log('Notification créée avec ID:', notification, 'categoryIdentifier:', notificationContent.categoryIdentifier);
+                logWithTime(`Notification créée avec ID: ${notification}, categoryIdentifier: ${notificationContent.categoryIdentifier}`);
             } catch (error) {
-                console.error('Erreur lors de la création de la notification:', error);
+                logWithTime(`Erreur lors de la création de la notification: ${error}`, 'error');
             }
         } catch (error) {
-            console.error('Erreur lors de l\'affichage de la notification:', error);
+            logWithTime(`Erreur lors de l'affichage de la notification: ${error}`, 'error');
         }
     };
 
@@ -272,98 +320,120 @@ export default function App() {
                     options: { opensAppToForeground: true },
                 },
             ]);
-            console.log('Catégorie de notification mise à jour avec action:', currentPausedState ? 'Reprendre' : 'Pause');
+            logWithTime(`Catégorie de notification mise à jour avec action: ${currentPausedState ? 'Reprendre' : 'Pause'}`);
         } catch (error) {
-            console.error('Erreur lors de la mise à jour des actions:', error);
+            logWithTime(`Erreur lors de la mise à jour des actions: ${error}`, 'error');
+        }
+    };
+
+    // Fonction pour programmer la prochaine notification de bip
+    // On programme une seule notification à la fois, puis on la reprogramme quand elle se déclenche
+    const scheduleNextBipNotification = async () => {
+        try {
+            // Calculer le délai en secondes jusqu'au prochain bip
+            const delaySeconds = intervalMinutes * 60;
+
+            // Annuler l'ancienne notification si elle existe
+            try {
+                await Notifications.cancelScheduledNotificationAsync('next-bip');
+            } catch (e) {
+                // Ignorer si elle n'existe pas
+            }
+
+            const now = new Date();
+            const nextBipTime = new Date(now.getTime() + delaySeconds * 1000);
+            logWithTime(`Programmation du prochain bip dans ${delaySeconds} secondes (${nextBipTime.toLocaleString('fr-FR')})`);
+
+            await Notifications.scheduleNotificationAsync({
+                identifier: 'next-bip',
+                content: {
+                    title: '', // Vide pour ne pas afficher de notification
+                    body: '', // Vide pour ne pas afficher de notification
+                    data: { type: 'bip-sound' },
+                    android: {
+                        channelId: 'reminders',
+                        priority: 'high',
+                        // Le son sera joué selon les paramètres du canal "Rappels"
+                    },
+                    sound: Platform.OS === 'ios' ? 'default' : undefined,
+                },
+                trigger: {
+                    seconds: delaySeconds, // Délai en secondes depuis maintenant
+                },
+            });
+
+            logWithTime(`Notification de bip programmée pour dans ${delaySeconds} secondes`);
+        } catch (error) {
+            logWithTime(`Erreur lors de la programmation du bip: ${error}`, 'error');
         }
     };
 
     const startReminder = async () => {
-        // Annuler toutes les notifications planifiées précédentes
+        // Annuler toutes les notifications de bip précédentes
         await cancelAllScheduledReminders();
-
-        if (intervalRef.current) {
-            clearInterval(intervalRef.current);
-            intervalRef.current = null;
-        }
 
         // Vérifier si on est dans les heures désactivées
         if (isInDisabledHours()) {
-            console.log('Dans les heures désactivées, attente...');
+            logWithTime('Dans les heures désactivées, attente...');
             // Afficher quand même la notification pour indiquer qu'on est en attente
             await showPersistentNotification(false);
             return;
         }
 
-        // Afficher la notification persistante avec le premier bip
-        await showPersistentNotification(true);
+        // Afficher la notification persistante
+        await showPersistentNotification(false);
 
-        // Programmer plusieurs bips à l'avance (fonctionne en arrière-plan)
-        // On programme 10 notifications à l'avance pour que les bips fonctionnent même en arrière-plan
-        const scheduleMultipleReminders = async () => {
-            const numRemindersToSchedule = 10; // Programmer 10 bips à l'avance
+        // Jouer le premier bip immédiatement
+        await playFirstBip();
 
-            for (let i = 1; i <= numRemindersToSchedule; i++) {
-                const delaySeconds = i * intervalMinutes * 60;
+        // Programmer le prochain bip (fonctionne même en arrière-plan)
+        await scheduleNextBipNotification();
+    };
 
-                const bipContent = {
-                    title: 'Rappel',
-                    body: `Bip de rappel`,
-                    data: { type: 'bip', reminderIndex: i },
-                    // Le son sera défini par le canal Android
-                };
-
-                // Configuration Android pour utiliser le bon canal
-                if (Platform.OS === 'android') {
-                    bipContent.android = {
+    // Jouer le premier bip immédiatement
+    const playFirstBip = async () => {
+        try {
+            await Notifications.scheduleNotificationAsync({
+                identifier: 'bip-immediate',
+                content: {
+                    title: '',
+                    body: '',
+                    data: { type: 'bip-sound' },
+                    android: {
                         channelId: 'reminders',
                         priority: 'high',
-                        // Le son sera joué selon les paramètres du canal "Rappels" définis par l'utilisateur
-                    };
-                }
-
-                await Notifications.scheduleNotificationAsync({
-                    identifier: `reminder-bip-${i}`,
-                    content: bipContent,
-                    trigger: {
-                        seconds: delaySeconds,
                     },
-                });
-            }
-
-            console.log(`${numRemindersToSchedule} notifications programmées à ${intervalMinutes} min d'intervalle`);
-        };
-
-        await scheduleMultipleReminders();
-
-        // Pas besoin de setInterval - les notifications sont déjà programmées
-        // L'app reprogrammera les notifications quand elle reviendra au premier plan
+                    sound: Platform.OS === 'ios' ? 'default' : undefined,
+                },
+                trigger: { seconds: 1 }, // 1 seconde pour jouer immédiatement
+            });
+            logWithTime('Premier bip programmé');
+        } catch (error) {
+            logWithTime(`Erreur lors du premier bip: ${error}`, 'error');
+        }
     };
 
     const cancelAllScheduledReminders = async () => {
         try {
-            // Annuler toutes les notifications de bip programmées (identifiants 1 à 10)
-            for (let i = 1; i <= 10; i++) {
-                try {
-                    await Notifications.cancelScheduledNotificationAsync(`reminder-bip-${i}`);
-                } catch (error) {
-                    // Ignorer si la notification n'existe pas
-                }
+            // Annuler la notification de bip programmée
+            try {
+                await Notifications.cancelScheduledNotificationAsync('next-bip');
+            } catch (error) {
+                // Ignorer si la notification n'existe pas
             }
-            console.log('Toutes les notifications de bip annulées');
+            // Annuler aussi le bip immédiat
+            try {
+                await Notifications.cancelScheduledNotificationAsync('bip-immediate');
+            } catch (error) { }
+            logWithTime('Toutes les notifications de bip annulées');
         } catch (error) {
-            console.error('Erreur lors de l\'annulation des rappels:', error);
+            logWithTime(`Erreur lors de l'annulation des bips: ${error}`, 'error');
         }
     };
 
     const stopReminder = async () => {
-        // Annuler toutes les notifications planifiées
+        // Annuler toutes les notifications de bip
         await cancelAllScheduledReminders();
-
-        if (intervalRef.current) {
-            clearInterval(intervalRef.current);
-            intervalRef.current = null;
-        }
 
         const PERSISTENT_NOTIFICATION_ID = 'reminder-persistent';
 
