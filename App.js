@@ -16,11 +16,16 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // Configuration des notifications
 Notifications.setNotificationHandler({
-    handleNotification: async () => ({
-        shouldShowAlert: true,
-        shouldPlaySound: true,
-        shouldSetBadge: false,
-    }),
+    handleNotification: async (notification) => {
+        // Afficher toutes les notifications avec son
+        return {
+            shouldShowAlert: true,
+            shouldPlaySound: true,
+            shouldSetBadge: false,
+            shouldShowBanner: true,
+            shouldShowList: true,
+        };
+    },
 });
 
 export default function App() {
@@ -45,38 +50,51 @@ export default function App() {
 
             // Configurer le canal de notification Android
             if (Platform.OS === 'android') {
-                await Notifications.setNotificationChannelAsync('reminders', {
-                    name: 'Rappels',
-                    importance: Notifications.AndroidImportance.HIGH,
-                    vibrationPattern: [0, 250, 250, 250],
-                    lightColor: '#FF231F7C',
-                    sound: 'default',
-                    enableVibrate: true,
-                    showBadge: false,
-                });
+                try {
+                    // Supprimer le canal s'il existe déjà (pour forcer la recréation avec les bons paramètres)
+                    // Note: sur Android, on ne peut pas vraiment supprimer un canal, mais on peut le recréer avec les bons paramètres
+                    await Notifications.setNotificationChannelAsync('reminders', {
+                        name: 'Rappels',
+                        description: 'Notifications de rappels avec bips sonores',
+                        importance: Notifications.AndroidImportance.HIGH,
+                        vibrationPattern: [0, 250, 250, 250],
+                        lightColor: '#FF231F7C',
+                        sound: 'default', // Définir le son par défaut dans le canal
+                        enableVibrate: true,
+                        showBadge: false,
+                    });
+                    console.log('Canal de notification "Rappels" créé avec succès');
+                } catch (error) {
+                    console.error('Erreur lors de la création du canal:', error);
+                }
             }
 
             // Demander les permissions de notification
             await registerForPushNotificationsAsync();
 
-            // Écouter les interactions avec les notifications
+            // Écouter les notifications reçues
             notificationListener.current = Notifications.addNotificationReceivedListener(
-                (notification) => {
-                    console.log('Notification reçue:', notification);
+                async (notification) => {
+                    console.log('Notification reçue:', notification.request.identifier);
+                    // Les notifications de bip sont déjà programmées à l'avance
+                    // Pas besoin de programmer de nouvelles notifications ici
                 }
             );
 
             responseListener.current = Notifications.addNotificationResponseReceivedListener(
                 (response) => {
                     const actionIdentifier = response.actionIdentifier;
-                    const data = response.notification.request.content.data;
 
-                    if (actionIdentifier === 'PAUSE_ACTION' || data?.type === 'paused' || data?.type === 'reminder') {
+                    // Ne déclencher handlePause que si on clique vraiment sur le bouton pause
+                    // et non pas si on clique simplement sur la notification
+                    if (actionIdentifier === 'PAUSE_ACTION') {
                         // Appeler handlePause via la ref
                         if (handlePauseRef.current) {
                             handlePauseRef.current();
                         }
                     }
+                    // Si on clique sur la notification elle-même (pas le bouton), on ne fait rien
+                    // L'application s'ouvrira simplement sans changer l'état
                 }
             );
         };
@@ -172,111 +190,98 @@ export default function App() {
     // Le son est maintenant joué directement via la notification persistante
     // en passant playSound=true à showPersistentNotification()
 
-    const showPersistentNotification = async (playSound = false) => {
+    const showPersistentNotification = async (playSound = false, pausedState = null) => {
         try {
+            // Utiliser le paramètre passé ou l'état actuel
+            const currentPausedState = pausedState !== null ? pausedState : isPaused;
+
             // Mettre à jour les actions de notification d'abord
-            await updateNotificationWithActions();
+            await updateNotificationWithActions(currentPausedState);
 
             const notificationContent = {
-                title: isPaused ? 'Rappel en pause' : 'Rappel actif',
-                body: isPaused
+                title: currentPausedState ? 'Rappel en pause' : 'Rappel actif',
+                body: currentPausedState
                     ? 'Appuyez sur Reprendre pour continuer'
                     : `Prochain bip dans ${intervalMinutes} minute(s)`,
-                sound: playSound ? 'default' : false, // Jouer le son seulement si demandé (pour le bip)
-                priority: Notifications.AndroidNotificationPriority.HIGH,
-                sticky: true,
-                categoryIdentifier: 'REMINDER',
-                data: { type: isPaused ? 'paused' : 'reminder' },
+                data: { type: currentPausedState ? 'paused' : 'reminder' },
                 autoDismiss: false,
             };
 
-            // Configuration spécifique Android
+            // Configuration spécifique par plateforme
+            // Sur Android ET iOS, utiliser categoryIdentifier pour les actions
+            notificationContent.categoryIdentifier = 'REMINDER';
+
             if (Platform.OS === 'android') {
+                // Sur Android, utiliser le canal (le son est défini dans le canal pour que l'utilisateur puisse le modifier)
                 notificationContent.android = {
                     channelId: 'reminders',
                     priority: 'high',
                     sticky: true,
                     ongoing: true,
                     autoCancel: false,
-                    actions: [
-                        {
-                            title: isPaused ? 'Reprendre' : 'Pause',
-                            pressAction: {
-                                id: 'pause_action',
-                            },
-                        },
-                    ],
+                    // Le son sera joué selon les paramètres du canal "Rappels" définis par l'utilisateur
                 };
+                console.log('Notification Android créée avec categoryIdentifier: REMINDER, channelId: reminders');
+            } else {
+                // Sur iOS, utiliser le son standard
+                notificationContent.sound = playSound ? 'default' : false;
+                notificationContent.priority = Notifications.AndroidNotificationPriority.HIGH;
+                notificationContent.sticky = true;
             }
 
             // Utiliser un ID constant pour la notification persistante
             const PERSISTENT_NOTIFICATION_ID = 'reminder-persistent';
 
-            // Supprimer toutes les notifications existantes avec cet identifier
+            // Annuler l'ancienne notification si elle existe
             try {
-                // Annuler toutes les notifications planifiées avec cet ID
                 await Notifications.cancelScheduledNotificationAsync(PERSISTENT_NOTIFICATION_ID);
             } catch (error) {
                 // Ignorer si aucune notification n'existe
             }
 
-            // Supprimer aussi la notification actuelle si elle existe
-            if (notificationId) {
-                try {
-                    await Notifications.dismissNotificationAsync(notificationId);
-                } catch (error) {
-                    // Ignorer si la notification n'existe plus
-                }
-            }
-
-            // Supprimer toutes les notifications avec cet identifier (au cas où)
+            // Créer la notification avec scheduleNotificationAsync et trigger: null (notification immédiate)
+            // Cela fonctionne pour Android ET iOS avec les catégories/actions
             try {
-                const allNotifications = await Notifications.getAllScheduledNotificationsAsync();
-                for (const notif of allNotifications) {
-                    if (notif.identifier === PERSISTENT_NOTIFICATION_ID) {
-                        await Notifications.cancelScheduledNotificationAsync(notif.identifier);
-                    }
-                }
+                const notification = await Notifications.scheduleNotificationAsync({
+                    identifier: PERSISTENT_NOTIFICATION_ID,
+                    content: notificationContent,
+                    trigger: null, // Notification immédiate
+                });
+
+                setNotificationId(notification);
+                console.log('Notification créée avec ID:', notification, 'categoryIdentifier:', notificationContent.categoryIdentifier);
             } catch (error) {
-                // Ignorer les erreurs
+                console.error('Erreur lors de la création de la notification:', error);
             }
-
-            // Créer une seule notification persistante avec un ID constant
-            const notification = await Notifications.scheduleNotificationAsync({
-                identifier: PERSISTENT_NOTIFICATION_ID,
-                content: notificationContent,
-                trigger: null, // Notification persistante (immédiate)
-            });
-
-            setNotificationId(notification);
         } catch (error) {
             console.error('Erreur lors de l\'affichage de la notification:', error);
         }
     };
 
-    const updateNotificationWithActions = async () => {
+    const updateNotificationWithActions = async (pausedState = null) => {
         try {
-            // Définir les catégories de notification avec actions
+            // Utiliser le paramètre passé ou l'état actuel
+            const currentPausedState = pausedState !== null ? pausedState : isPaused;
+
+            // Définir les catégories de notification avec actions pour Android ET iOS
+            // Sur Android, les actions de notification doivent aussi être définies via setNotificationCategoryAsync
             await Notifications.setNotificationCategoryAsync('REMINDER', [
                 {
                     identifier: 'PAUSE_ACTION',
-                    buttonTitle: isPaused ? 'Reprendre' : 'Pause',
+                    buttonTitle: currentPausedState ? 'Reprendre' : 'Pause',
                     options: { opensAppToForeground: true },
                 },
-            ], {
-                intentIdentifiers: [],
-                hiddenPreviewsBodyPlaceholder: '',
-                customDismissAction: true,
-                allowInCarPlay: false,
-                showTitle: true,
-                showSubtitle: true,
-            });
+            ]);
+            console.log('Catégorie de notification mise à jour avec action:', currentPausedState ? 'Reprendre' : 'Pause');
         } catch (error) {
             console.error('Erreur lors de la mise à jour des actions:', error);
         }
     };
 
     const startReminder = async () => {
+        // Annuler toutes les notifications planifiées précédentes
+        await cancelAllScheduledReminders();
+
         if (intervalRef.current) {
             clearInterval(intervalRef.current);
             intervalRef.current = null;
@@ -293,16 +298,68 @@ export default function App() {
         // Afficher la notification persistante avec le premier bip
         await showPersistentNotification(true);
 
-        // Programmer les bips suivants - la notification persistante sera mise à jour avec le son
-        intervalRef.current = setInterval(async () => {
-            if (!isPaused && !isInDisabledHours()) {
-                // Mettre à jour la notification persistante avec le son (bip)
-                await showPersistentNotification(true);
+        // Programmer plusieurs bips à l'avance (fonctionne en arrière-plan)
+        // On programme 10 notifications à l'avance pour que les bips fonctionnent même en arrière-plan
+        const scheduleMultipleReminders = async () => {
+            const numRemindersToSchedule = 10; // Programmer 10 bips à l'avance
+
+            for (let i = 1; i <= numRemindersToSchedule; i++) {
+                const delaySeconds = i * intervalMinutes * 60;
+
+                const bipContent = {
+                    title: 'Rappel',
+                    body: `Bip de rappel`,
+                    data: { type: 'bip', reminderIndex: i },
+                    // Le son sera défini par le canal Android
+                };
+
+                // Configuration Android pour utiliser le bon canal
+                if (Platform.OS === 'android') {
+                    bipContent.android = {
+                        channelId: 'reminders',
+                        priority: 'high',
+                        // Le son sera joué selon les paramètres du canal "Rappels" définis par l'utilisateur
+                    };
+                }
+
+                await Notifications.scheduleNotificationAsync({
+                    identifier: `reminder-bip-${i}`,
+                    content: bipContent,
+                    trigger: {
+                        seconds: delaySeconds,
+                    },
+                });
             }
-        }, intervalMinutes * 60 * 1000);
+
+            console.log(`${numRemindersToSchedule} notifications programmées à ${intervalMinutes} min d'intervalle`);
+        };
+
+        await scheduleMultipleReminders();
+
+        // Pas besoin de setInterval - les notifications sont déjà programmées
+        // L'app reprogrammera les notifications quand elle reviendra au premier plan
+    };
+
+    const cancelAllScheduledReminders = async () => {
+        try {
+            // Annuler toutes les notifications de bip programmées (identifiants 1 à 10)
+            for (let i = 1; i <= 10; i++) {
+                try {
+                    await Notifications.cancelScheduledNotificationAsync(`reminder-bip-${i}`);
+                } catch (error) {
+                    // Ignorer si la notification n'existe pas
+                }
+            }
+            console.log('Toutes les notifications de bip annulées');
+        } catch (error) {
+            console.error('Erreur lors de l\'annulation des rappels:', error);
+        }
     };
 
     const stopReminder = async () => {
+        // Annuler toutes les notifications planifiées
+        await cancelAllScheduledReminders();
+
         if (intervalRef.current) {
             clearInterval(intervalRef.current);
             intervalRef.current = null;
@@ -361,15 +418,15 @@ export default function App() {
         // Sauvegarder l'état de pause
         await saveSettings();
 
-        // Mettre à jour la notification
+        // Mettre à jour la notification avec le nouvel état
         if (isActive) {
-            await showPersistentNotification();
+            await showPersistentNotification(false, newPausedState);
         }
 
         // Si on reprend, redémarrer immédiatement si nécessaire
         if (!newPausedState && isActive && !isInDisabledHours()) {
             // Le son sera joué via la notification persistante
-            await showPersistentNotification(true);
+            await showPersistentNotification(true, newPausedState);
         }
     };
 
