@@ -7,6 +7,9 @@
   <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
   <uses-permission android:name="android.permission.VIBRATE"/>
   <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+  <!-- Permissions pour réveiller l'écran avec les notifications sensibles au temps -->
+  <uses-permission android:name="android.permission.WAKE_LOCK"/>
+  <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
   <queries>
     <intent>
       <action android:name="android.intent.action.VIEW"/>

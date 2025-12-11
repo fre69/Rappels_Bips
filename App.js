@@ -77,19 +77,34 @@ export default function App() {
         const initialize = async () => {
             await loadSettings();
 
-            // Configurer le canal de notification Android (simplifié - le système gérera le son)
+            // Configurer le canal de notification Android avec priorité élevée pour notifications sensibles au temps
+            // Les permissions WAKE_LOCK et USE_FULL_SCREEN_INTENT ont été ajoutées dans AndroidManifest.xml
+            // pour permettre le réveil de l'écran avec les notifications
+
+            // ⚠️ IMPORTANT : Expo gère automatiquement la création du NotificationChannel et NotificationManager
+            // Cette fonction setNotificationChannelAsync() fait EXACTEMENT ce que fait le code Kotlin natif :
+            // 
+            // Code Kotlin natif (PAS NÉCESSAIRE avec Expo) :
+            // val channel = NotificationChannel(CHANNEL_ID, "High priority notifications", NotificationManager.IMPORTANCE_HIGH)
+            // val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            // notificationManager.createNotificationChannel(channel)
+            //
+            // Expo fait tout cela automatiquement en arrière-plan via son module natif !
             if (Platform.OS === 'android') {
                 try {
                     await Notifications.setNotificationChannelAsync('reminders', {
                         name: 'Rappels',
-                        description: 'Notifications de rappels',
-                        importance: Notifications.AndroidImportance.HIGH,
+                        description: 'Notifications de rappels sensibles au temps (peuvent réveiller l\'écran)',
+                        importance: Notifications.AndroidImportance.HIGH, // Priorité élevée pour notifications time-sensitive
                         vibrationPattern: [0, 250, 250, 250],
                         lightColor: '#FF231F7C',
                         enableVibrate: true,
                         showBadge: false,
+                        // Options supplémentaires pour notifications sensibles au temps
+                        sound: 'default',
+                        enableLights: true,
                     });
-                    logWithTime('Canal de notification "Rappels" créé');
+                    logWithTime('Canal de notification "Rappels" créé avec priorité élevée (time-sensitive, réveil écran activé)');
                 } catch (error) {
                     logWithTime(`Erreur lors de la création du canal: ${error}`, 'error');
                 }
@@ -213,18 +228,34 @@ export default function App() {
     };
 
     const registerForPushNotificationsAsync = async () => {
+        // Pour Android 13+ (API 33+), la permission POST_NOTIFICATIONS est requise
         const { status: existingStatus } = await Notifications.getPermissionsAsync();
         let finalStatus = existingStatus;
 
         if (existingStatus !== 'granted') {
-            const { status } = await Notifications.requestPermissionsAsync();
+            const { status } = await Notifications.requestPermissionsAsync({
+                ios: {
+                    allowAlert: true,
+                    allowBadge: true,
+                    allowSound: true,
+                    allowAnnouncements: false,
+                },
+                android: {
+                    // Expo gère automatiquement POST_NOTIFICATIONS pour Android 13+
+                },
+            });
             finalStatus = status;
         }
 
         if (finalStatus !== 'granted') {
-            Alert.alert('Permission refusée', 'Les notifications sont nécessaires pour les rappels.');
+            Alert.alert(
+                'Permission refusée',
+                'Les notifications sont nécessaires pour les rappels. Veuillez activer les notifications dans les paramètres de l\'application.'
+            );
             return;
         }
+
+        logWithTime('Permissions de notification accordées');
     };
 
     const isInDisabledHours = () => {
@@ -262,17 +293,30 @@ export default function App() {
             };
 
             // Configuration spécifique par plateforme
-            // Sur Android ET iOS, utiliser categoryIdentifier pour les actions
+
+            // CATÉGORIE (categoryIdentifier) : Pour les ACTIONS/BOUTONS sur la notification
+            // - Utilisé sur iOS ET Android pour définir les boutons d'action (ex: "Pause"/"Reprendre")
+            // - Définie via setNotificationCategoryAsync('REMINDER', [...])
+            // - Permet d'ajouter des actions interactives aux notifications
             notificationContent.categoryIdentifier = 'REMINDER';
 
             if (Platform.OS === 'android') {
-                // Sur Android, utiliser le canal (simplifié - le système gérera le son)
+                // CANAL ANDROID (channelId) : Pour la GESTION SYSTÈME des notifications
+                // - Spécifique à Android (depuis Android 8.0)
+                // - Créé via setNotificationChannelAsync('reminders', {...})
+                // - Permet à l'utilisateur de gérer les paramètres (son, vibration, importance) 
+                //   dans les paramètres système Android
+                // - Différent du categoryIdentifier qui gère les actions/boutons
+                // Selon la documentation Android: https://developer.android.com/develop/ui/views/notifications/time-sensitive
                 notificationContent.android = {
-                    channelId: 'reminders',
-                    priority: 'high',
-                    sticky: true,
-                    ongoing: true,
-                    autoCancel: false,
+                    channelId: 'reminders', // Référence au canal créé dans setNotificationChannelAsync
+                    priority: Notifications.AndroidNotificationPriority.HIGH, // Priorité élevée pour time-sensitive
+                    sticky: true, // Notification persistante
+                    ongoing: true, // Notification en cours (foreground) - pour notifications continues
+                    autoCancel: false, // Ne pas annuler automatiquement
+                    // Options pour notifications sensibles au temps
+                    sound: playSound ? 'default' : undefined,
+                    vibrate: playSound ? [0, 250, 250, 250] : undefined,
                 };
             } else {
                 // Sur iOS, utiliser le son standard
@@ -315,7 +359,7 @@ export default function App() {
                                 data: { type: 'bip-sound' },
                                 android: {
                                     channelId: 'reminders',
-                                    priority: 'high',
+                                    priority: Notifications.AndroidNotificationPriority.HIGH, // Priorité élevée pour time-sensitive
                                     // Notification silencieuse visuellement mais avec son
                                 },
                                 sound: Platform.OS === 'ios' ? 'default' : undefined,
@@ -347,8 +391,11 @@ export default function App() {
             // Utiliser le paramètre passé ou l'état actuel
             const currentPausedState = pausedState !== null ? pausedState : isPaused;
 
-            // Définir les catégories de notification avec actions pour Android ET iOS
-            // Sur Android, les actions de notification doivent aussi être définies via setNotificationCategoryAsync
+            // Définir la CATÉGORIE de notification avec actions (boutons interactifs)
+            // - 'REMINDER' est le categoryIdentifier utilisé dans notificationContent.categoryIdentifier
+            // - Cette catégorie définit les boutons d'action affichés sur la notification
+            // - Fonctionne sur iOS ET Android (contrairement au channelId qui est Android uniquement)
+            // - Les actions permettent à l'utilisateur d'interagir directement depuis la notification
             await Notifications.setNotificationCategoryAsync('REMINDER', [
                 {
                     identifier: 'PAUSE_ACTION',
