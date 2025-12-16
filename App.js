@@ -10,14 +10,18 @@ import {
     Alert,
     Platform,
     AppState,
+    Linking,
 } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import BackgroundTimer from 'react-native-background-timer';
+import * as TaskManager from 'expo-task-manager';
+import * as BackgroundFetch from 'expo-background-fetch';
+
+// Nom de la tâche en arrière-plan
+const BACKGROUND_REMINDER_TASK = 'background-reminder-task';
 
 // Fonction helper pour les logs avec timestamp
 const logWithTime = (message, type = 'log') => {
-    //Je veux l'heure sans la date
     const timestamp = new Date().toLocaleTimeString('fr-FR', {
         hour: '2-digit',
         minute: '2-digit',
@@ -31,6 +35,124 @@ const logWithTime = (message, type = 'log') => {
     }
 };
 
+// Helper pour vérifier si on est dans les heures désactivées (utilisé dans la tâche)
+const checkIsInDisabledHours = async () => {
+    try {
+        const isDisabledHoursActive = await AsyncStorage.getItem('isDisabledHoursActive');
+        if (isDisabledHoursActive !== 'true') return false;
+
+        const disableStartHour = parseInt(await AsyncStorage.getItem('disableStartHour')) || 22;
+        const disableEndHour = parseInt(await AsyncStorage.getItem('disableEndHour')) || 8;
+
+        const now = new Date();
+        const currentHour = now.getHours();
+
+        if (disableStartHour > disableEndHour) {
+            return currentHour >= disableStartHour || currentHour < disableEndHour;
+        } else {
+            return currentHour >= disableStartHour && currentHour < disableEndHour;
+        }
+    } catch (error) {
+        logWithTime(`Erreur lors de la vérification des heures désactivées: ${error}`, 'error');
+        return false;
+    }
+};
+
+// Helper pour jouer une notification sonore (utilisé dans la tâche en arrière-plan)
+const playBackgroundNotificationSound = async () => {
+    try {
+        const intervalMinutes = parseInt(await AsyncStorage.getItem('intervalMinutes')) || 15;
+        const isPaused = await AsyncStorage.getItem('isPaused') === 'true';
+
+        // Créer une notification pour le son
+        const soundNotificationId = `sound-${Date.now()}`;
+        await Notifications.scheduleNotificationAsync({
+            identifier: soundNotificationId,
+            content: {
+                title: '',
+                body: '',
+                data: { type: 'bip-sound' },
+                ...(Platform.OS === 'android' && {
+                    android: {
+                        channelId: 'reminders',
+                        priority: Notifications.AndroidNotificationPriority.HIGH,
+                    },
+                }),
+                sound: Platform.OS === 'ios' ? 'default' : undefined,
+            },
+            trigger: null, // Immédiat
+        });
+
+        // Mettre à jour la notification persistante
+        const PERSISTENT_NOTIFICATION_ID = 'reminder-persistent';
+        await Notifications.scheduleNotificationAsync({
+            identifier: PERSISTENT_NOTIFICATION_ID,
+            content: {
+                title: isPaused ? 'Rappel en pause' : 'Rappel actif',
+                body: isPaused
+                    ? 'Appuyez sur Reprendre pour continuer'
+                    : `Prochain bip dans ${intervalMinutes} minute(s)`,
+                data: { type: isPaused ? 'paused' : 'reminder' },
+                categoryIdentifier: 'REMINDER',
+                ...(Platform.OS === 'android' && {
+                    android: {
+                        channelId: 'reminders',
+                        priority: Notifications.AndroidNotificationPriority.HIGH,
+                        sticky: true,
+                        ongoing: true,
+                        autoCancel: false,
+                        sound: 'default',
+                        vibrate: [0, 250, 250, 250],
+                    },
+                }),
+            },
+            trigger: null,
+        });
+
+        // Supprimer la notification sonore après 2 secondes
+        setTimeout(async () => {
+            try {
+                await Notifications.dismissNotificationAsync(soundNotificationId);
+            } catch (e) { }
+        }, 2000);
+
+        logWithTime('Notification sonore jouée en arrière-plan');
+    } catch (error) {
+        logWithTime(`Erreur lors de la notification en arrière-plan: ${error}`, 'error');
+    }
+};
+
+// Définition de la tâche en arrière-plan - DOIT être en dehors du composant
+TaskManager.defineTask(BACKGROUND_REMINDER_TASK, async () => {
+    try {
+        logWithTime('Tâche en arrière-plan déclenchée');
+
+        // Vérifier si le rappel est actif
+        const isActive = await AsyncStorage.getItem('isActive') === 'true';
+        const isPaused = await AsyncStorage.getItem('isPaused') === 'true';
+
+        if (!isActive || isPaused) {
+            logWithTime('Rappel inactif ou en pause, tâche ignorée');
+            return BackgroundFetch.BackgroundFetchResult.NoData;
+        }
+
+        // Vérifier si on est dans les heures désactivées
+        const inDisabledHours = await checkIsInDisabledHours();
+        if (inDisabledHours) {
+            logWithTime('Dans les heures désactivées, tâche ignorée');
+            return BackgroundFetch.BackgroundFetchResult.NoData;
+        }
+
+        // Jouer la notification sonore
+        await playBackgroundNotificationSound();
+
+        return BackgroundFetch.BackgroundFetchResult.NewData;
+    } catch (error) {
+        logWithTime(`Erreur dans la tâche en arrière-plan: ${error}`, 'error');
+        return BackgroundFetch.BackgroundFetchResult.Failed;
+    }
+});
+
 // Configuration des notifications
 Notifications.setNotificationHandler({
     handleNotification: async (notification) => {
@@ -39,18 +161,18 @@ Notifications.setNotificationHandler({
         // Si c'est une notification de bip, jouer le son mais ne pas l'afficher
         if (data?.type === 'bip-sound') {
             return {
-                shouldShowBanner: false, // Ne pas afficher dans la bannière
-                shouldShowList: false, // Ne pas afficher dans la liste
-                shouldPlaySound: true, // Jouer le son du canal "Rappels"
+                shouldShowBanner: false,
+                shouldShowList: false,
+                shouldPlaySound: true,
                 shouldSetBadge: false,
             };
         }
 
-        // Pour la notification permanente, afficher sans son (le son est joué séparément)
+        // Pour la notification permanente, afficher sans son
         return {
-            shouldShowBanner: true, // Afficher dans la bannière
-            shouldShowList: true, // Afficher dans la liste des notifications
-            shouldPlaySound: false, // Le son est géré par les notifications sound-only
+            shouldShowBanner: true,
+            shouldShowList: true,
+            shouldPlaySound: false,
             shouldSetBadge: false,
         };
     },
@@ -60,51 +182,106 @@ export default function App() {
     const [intervalMinutes, setIntervalMinutes] = useState(15);
     const [isActive, setIsActive] = useState(false);
     const [isPaused, setIsPaused] = useState(false);
-    // sound state retiré - on utilise les notifications pour le son
     const [notificationId, setNotificationId] = useState(null);
     const [disableStartHour, setDisableStartHour] = useState(22);
     const [disableEndHour, setDisableEndHour] = useState(8);
     const [isDisabledHoursActive, setIsDisabledHoursActive] = useState(false);
+    const [backgroundTaskStatus, setBackgroundTaskStatus] = useState('Non vérifié');
 
-    const intervalRef = useRef(null);
     const notificationListener = useRef(null);
     const responseListener = useRef(null);
     const handlePauseRef = useRef(null);
-    const wasActiveRef = useRef(false); // Pour suivre si le rappel était déjà actif avant un changement
+    const wasActiveRef = useRef(false);
+
+    // Fonction pour enregistrer la tâche en arrière-plan
+    const registerBackgroundTask = async (intervalInMinutes) => {
+        try {
+            // Vérifier le statut de BackgroundFetch
+            const status = await BackgroundFetch.getStatusAsync();
+            logWithTime(`Statut BackgroundFetch: ${status}`);
+
+            if (status === BackgroundFetch.BackgroundFetchStatus.Restricted) {
+                setBackgroundTaskStatus('Restreint par le système');
+                Alert.alert(
+                    'Attention',
+                    'Les tâches en arrière-plan sont restreintes sur cet appareil. Les rappels pourraient ne pas fonctionner quand l\'écran est éteint.'
+                );
+                return false;
+            }
+
+            if (status === BackgroundFetch.BackgroundFetchStatus.Denied) {
+                setBackgroundTaskStatus('Refusé');
+                Alert.alert(
+                    'Permission requise',
+                    'Les tâches en arrière-plan sont désactivées. Veuillez les activer dans les paramètres de l\'application.',
+                    [
+                        { text: 'Annuler', style: 'cancel' },
+                        { text: 'Paramètres', onPress: () => Linking.openSettings() },
+                    ]
+                );
+                return false;
+            }
+
+            // Désenregistrer la tâche existante si elle existe
+            const isRegistered = await TaskManager.isTaskRegisteredAsync(BACKGROUND_REMINDER_TASK);
+            if (isRegistered) {
+                await BackgroundFetch.unregisterTaskAsync(BACKGROUND_REMINDER_TASK);
+                logWithTime('Ancienne tâche en arrière-plan désenregistrée');
+            }
+
+            // Enregistrer la nouvelle tâche
+            // Note: minimumInterval est en secondes
+            const intervalInSeconds = intervalInMinutes * 60;
+
+            await BackgroundFetch.registerTaskAsync(BACKGROUND_REMINDER_TASK, {
+                minimumInterval: intervalInSeconds,
+                stopOnTerminate: false, // Continuer même si l'app est fermée
+                startOnBoot: true, // Redémarrer après reboot
+            });
+
+            setBackgroundTaskStatus('Actif');
+            logWithTime(`Tâche en arrière-plan enregistrée avec intervalle de ${intervalInMinutes} minute(s)`);
+            return true;
+        } catch (error) {
+            logWithTime(`Erreur lors de l'enregistrement de la tâche: ${error}`, 'error');
+            setBackgroundTaskStatus(`Erreur: ${error.message}`);
+            return false;
+        }
+    };
+
+    // Fonction pour désenregistrer la tâche en arrière-plan
+    const unregisterBackgroundTask = async () => {
+        try {
+            const isRegistered = await TaskManager.isTaskRegisteredAsync(BACKGROUND_REMINDER_TASK);
+            if (isRegistered) {
+                await BackgroundFetch.unregisterTaskAsync(BACKGROUND_REMINDER_TASK);
+                logWithTime('Tâche en arrière-plan désenregistrée');
+            }
+            setBackgroundTaskStatus('Inactif');
+        } catch (error) {
+            logWithTime(`Erreur lors du désenregistrement: ${error}`, 'error');
+        }
+    };
 
     useEffect(() => {
-        // Initialisation : charger les paramètres puis configurer
         const initialize = async () => {
             await loadSettings();
 
-            // Configurer le canal de notification Android avec priorité élevée pour notifications sensibles au temps
-            // Les permissions WAKE_LOCK et USE_FULL_SCREEN_INTENT ont été ajoutées dans AndroidManifest.xml
-            // pour permettre le réveil de l'écran avec les notifications
-
-            // ⚠️ IMPORTANT : Expo gère automatiquement la création du NotificationChannel et NotificationManager
-            // Cette fonction setNotificationChannelAsync() fait EXACTEMENT ce que fait le code Kotlin natif :
-            // 
-            // Code Kotlin natif (PAS NÉCESSAIRE avec Expo) :
-            // val channel = NotificationChannel(CHANNEL_ID, "High priority notifications", NotificationManager.IMPORTANCE_HIGH)
-            // val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            // notificationManager.createNotificationChannel(channel)
-            //
-            // Expo fait tout cela automatiquement en arrière-plan via son module natif !
+            // Configurer le canal de notification Android
             if (Platform.OS === 'android') {
                 try {
                     await Notifications.setNotificationChannelAsync('reminders', {
                         name: 'Rappels',
-                        description: 'Notifications de rappels sensibles au temps (peuvent réveiller l\'écran)',
-                        importance: Notifications.AndroidImportance.HIGH, // Priorité élevée pour notifications time-sensitive
+                        description: 'Notifications de rappels sensibles au temps',
+                        importance: Notifications.AndroidImportance.HIGH,
                         vibrationPattern: [0, 250, 250, 250],
                         lightColor: '#FF231F7C',
                         enableVibrate: true,
                         showBadge: false,
-                        // Options supplémentaires pour notifications sensibles au temps
                         sound: 'default',
                         enableLights: true,
                     });
-                    logWithTime('Canal de notification "Rappels" créé avec priorité élevée (time-sensitive, réveil écran activé)');
+                    logWithTime('Canal de notification "Rappels" créé');
                 } catch (error) {
                     logWithTime(`Erreur lors de la création du canal: ${error}`, 'error');
                 }
@@ -113,13 +290,20 @@ export default function App() {
             // Demander les permissions de notification
             await registerForPushNotificationsAsync();
 
-            // Écouter les notifications reçues (pour logging uniquement maintenant)
+            // Vérifier l'état de la tâche en arrière-plan
+            const isRegistered = await TaskManager.isTaskRegisteredAsync(BACKGROUND_REMINDER_TASK);
+            if (isRegistered) {
+                setBackgroundTaskStatus('Actif');
+            } else {
+                setBackgroundTaskStatus('Inactif');
+            }
+
+            // Écouter les notifications
             notificationListener.current = Notifications.addNotificationReceivedListener(
                 async (notification) => {
                     const data = notification.request.content.data;
                     if (data?.type === 'bip-sound') {
                         logWithTime('Bip sonore déclenché');
-                        // Le timer gère maintenant la programmation des bips
                     }
                 }
             );
@@ -127,17 +311,11 @@ export default function App() {
             responseListener.current = Notifications.addNotificationResponseReceivedListener(
                 (response) => {
                     const actionIdentifier = response.actionIdentifier;
-
-                    // Ne déclencher handlePause que si on clique vraiment sur le bouton pause
-                    // et non pas si on clique simplement sur la notification
                     if (actionIdentifier === 'PAUSE_ACTION') {
-                        // Appeler handlePause via la ref
                         if (handlePauseRef.current) {
                             handlePauseRef.current();
                         }
                     }
-                    // Si on clique sur la notification elle-même (pas le bouton), on ne fait rien
-                    // L'application s'ouvrira simplement sans changer l'état
                 }
             );
         };
@@ -151,16 +329,11 @@ export default function App() {
             if (responseListener.current) {
                 Notifications.removeNotificationSubscription(responseListener.current);
             }
-            // Arrêter le timer si il existe
-            if (intervalRef.current) {
-                BackgroundTimer.clearInterval(intervalRef.current);
-            }
         };
     }, []);
 
     useEffect(() => {
         if (isActive && !isPaused) {
-            // Si le rappel était déjà actif, c'est juste un changement d'intervalle - ne pas jouer de son
             const shouldPlaySound = !wasActiveRef.current;
             wasActiveRef.current = true;
             startReminder(shouldPlaySound);
@@ -170,21 +343,16 @@ export default function App() {
         }
     }, [isActive, isPaused, intervalMinutes]);
 
-    // Redémarrer le timer quand l'app revient au premier plan
+    // Redémarrer quand l'app revient au premier plan
     useEffect(() => {
         const subscription = AppState.addEventListener('change', async (nextAppState) => {
             if (nextAppState === 'active' && isActive && !isPaused) {
-                logWithTime('App revenue au premier plan - vérification du timer');
-                // Le timer devrait continuer à fonctionner, mais on peut le redémarrer pour être sûr
-                if (!intervalRef.current && isActive && !isPaused && !isInDisabledHours()) {
-                    const intervalMs = intervalMinutes * 60 * 1000;
-                    intervalRef.current = BackgroundTimer.setInterval(async () => {
-                        if (isActive && !isPaused && !isInDisabledHours()) {
-                            logWithTime('Timer déclenché - mise à jour notification et son');
-                            await showPersistentNotification(true);
-                        }
-                    }, intervalMs);
-                    logWithTime('Timer redémarré');
+                logWithTime('App revenue au premier plan - vérification de la tâche');
+                // Vérifier si la tâche est toujours enregistrée
+                const isRegistered = await TaskManager.isTaskRegisteredAsync(BACKGROUND_REMINDER_TASK);
+                if (!isRegistered && !isInDisabledHours()) {
+                    logWithTime('Tâche non enregistrée, réenregistrement...');
+                    await registerBackgroundTask(intervalMinutes);
                 }
             }
         });
@@ -228,7 +396,6 @@ export default function App() {
     };
 
     const registerForPushNotificationsAsync = async () => {
-        // Pour Android 13+ (API 33+), la permission POST_NOTIFICATIONS est requise
         const { status: existingStatus } = await Notifications.getPermissionsAsync();
         let finalStatus = existingStatus;
 
@@ -240,9 +407,7 @@ export default function App() {
                     allowSound: true,
                     allowAnnouncements: false,
                 },
-                android: {
-                    // Expo gère automatiquement POST_NOTIFICATIONS pour Android 13+
-                },
+                android: {},
             });
             finalStatus = status;
         }
@@ -264,7 +429,6 @@ export default function App() {
         const now = new Date();
         const currentHour = now.getHours();
 
-        // Gestion du cas où la plage horaire traverse minuit
         if (disableStartHour > disableEndHour) {
             return currentHour >= disableStartHour || currentHour < disableEndHour;
         } else {
@@ -272,15 +436,10 @@ export default function App() {
         }
     };
 
-    // Le son est maintenant joué directement via la notification persistante
-    // en passant playSound=true à showPersistentNotification()
-
     const showPersistentNotification = async (playSound = false, pausedState = null) => {
         try {
-            // Utiliser le paramètre passé ou l'état actuel
             const currentPausedState = pausedState !== null ? pausedState : isPaused;
 
-            // Mettre à jour les actions de notification d'abord
             await updateNotificationWithActions(currentPausedState);
 
             const notificationContent = {
@@ -292,62 +451,40 @@ export default function App() {
                 autoDismiss: false,
             };
 
-            // Configuration spécifique par plateforme
-
-            // CATÉGORIE (categoryIdentifier) : Pour les ACTIONS/BOUTONS sur la notification
-            // - Utilisé sur iOS ET Android pour définir les boutons d'action (ex: "Pause"/"Reprendre")
-            // - Définie via setNotificationCategoryAsync('REMINDER', [...])
-            // - Permet d'ajouter des actions interactives aux notifications
             notificationContent.categoryIdentifier = 'REMINDER';
 
             if (Platform.OS === 'android') {
-                // CANAL ANDROID (channelId) : Pour la GESTION SYSTÈME des notifications
-                // - Spécifique à Android (depuis Android 8.0)
-                // - Créé via setNotificationChannelAsync('reminders', {...})
-                // - Permet à l'utilisateur de gérer les paramètres (son, vibration, importance) 
-                //   dans les paramètres système Android
-                // - Différent du categoryIdentifier qui gère les actions/boutons
-                // Selon la documentation Android: https://developer.android.com/develop/ui/views/notifications/time-sensitive
                 notificationContent.android = {
-                    channelId: 'reminders', // Référence au canal créé dans setNotificationChannelAsync
-                    priority: Notifications.AndroidNotificationPriority.HIGH, // Priorité élevée pour time-sensitive
-                    sticky: true, // Notification persistante
-                    ongoing: true, // Notification en cours (foreground) - pour notifications continues
-                    autoCancel: false, // Ne pas annuler automatiquement
-                    // Options pour notifications sensibles au temps
+                    channelId: 'reminders',
+                    priority: Notifications.AndroidNotificationPriority.HIGH,
+                    sticky: true,
+                    ongoing: true,
+                    autoCancel: false,
                     sound: playSound ? 'default' : undefined,
                     vibrate: playSound ? [0, 250, 250, 250] : undefined,
                 };
             } else {
-                // Sur iOS, utiliser le son standard
                 notificationContent.sound = playSound ? 'default' : false;
                 notificationContent.priority = Notifications.AndroidNotificationPriority.HIGH;
                 notificationContent.sticky = true;
             }
 
-            // Utiliser un ID constant pour la notification persistante
             const PERSISTENT_NOTIFICATION_ID = 'reminder-persistent';
 
-            // Annuler l'ancienne notification si elle existe
             try {
                 await Notifications.cancelScheduledNotificationAsync(PERSISTENT_NOTIFICATION_ID);
-            } catch (error) {
-                // Ignorer si aucune notification n'existe
-            }
+            } catch (error) { }
 
-            // Créer la notification avec scheduleNotificationAsync et trigger: null (notification immédiate)
-            // Cela fonctionne pour Android ET iOS avec les catégories/actions
             try {
                 const notification = await Notifications.scheduleNotificationAsync({
                     identifier: PERSISTENT_NOTIFICATION_ID,
                     content: notificationContent,
-                    trigger: null, // Notification immédiate
+                    trigger: null,
                 });
 
                 setNotificationId(notification);
-                logWithTime(`Notification créée avec ID: ${notification}, categoryIdentifier: ${notificationContent.categoryIdentifier}`);
+                logWithTime(`Notification créée avec ID: ${notification}`);
 
-                // Si on doit jouer le son, créer une notification sonore séparée (silencieuse visuellement)
                 if (playSound) {
                     try {
                         const soundNotificationId = `sound-${Date.now()}`;
@@ -359,14 +496,12 @@ export default function App() {
                                 data: { type: 'bip-sound' },
                                 android: {
                                     channelId: 'reminders',
-                                    priority: Notifications.AndroidNotificationPriority.HIGH, // Priorité élevée pour time-sensitive
-                                    // Notification silencieuse visuellement mais avec son
+                                    priority: Notifications.AndroidNotificationPriority.HIGH,
                                 },
                                 sound: Platform.OS === 'ios' ? 'default' : undefined,
                             },
-                            trigger: { seconds: 1 }, // 1 seconde pour jouer immédiatement
+                            trigger: { seconds: 1 },
                         });
-                        // Supprimer après le son
                         setTimeout(async () => {
                             try {
                                 await Notifications.dismissNotificationAsync(soundNotificationId);
@@ -388,14 +523,8 @@ export default function App() {
 
     const updateNotificationWithActions = async (pausedState = null) => {
         try {
-            // Utiliser le paramètre passé ou l'état actuel
             const currentPausedState = pausedState !== null ? pausedState : isPaused;
 
-            // Définir la CATÉGORIE de notification avec actions (boutons interactifs)
-            // - 'REMINDER' est le categoryIdentifier utilisé dans notificationContent.categoryIdentifier
-            // - Cette catégorie définit les boutons d'action affichés sur la notification
-            // - Fonctionne sur iOS ET Android (contrairement au channelId qui est Android uniquement)
-            // - Les actions permettent à l'utilisateur d'interagir directement depuis la notification
             await Notifications.setNotificationCategoryAsync('REMINDER', [
                 {
                     identifier: 'PAUSE_ACTION',
@@ -409,53 +538,30 @@ export default function App() {
         }
     };
 
-    // Fonction scheduleNextBipNotification supprimée - on utilise maintenant BackgroundTimer
-
     const startReminder = async (playSound = true) => {
-        // Annuler toutes les notifications de bip précédentes
         await cancelAllScheduledReminders();
 
-        // Vérifier si on est dans les heures désactivées
         if (isInDisabledHours()) {
             logWithTime('Dans les heures désactivées, attente...');
-            // Afficher quand même la notification pour indiquer qu'on est en attente
             await showPersistentNotification(false);
             return;
         }
 
-        // Afficher la notification persistante (avec ou sans son selon le contexte)
+        // Afficher la notification persistante
         await showPersistentNotification(playSound);
 
-        // Utiliser un timer pour mettre à jour la notification et jouer le son à intervalles réguliers
-        // Ce timer fonctionne mieux en arrière-plan que les notifications programmées sur Android moderne
-        const intervalMs = intervalMinutes * 60 * 1000;
-
-        // Arrêter le timer précédent s'il existe
-        if (intervalRef.current) {
-            BackgroundTimer.clearInterval(intervalRef.current);
+        // Enregistrer la tâche en arrière-plan
+        const success = await registerBackgroundTask(intervalMinutes);
+        if (success) {
+            logWithTime(`Tâche en arrière-plan enregistrée pour ${intervalMinutes} minute(s)`);
         }
-
-        intervalRef.current = BackgroundTimer.setInterval(async () => {
-            if (isActive && !isPaused && !isInDisabledHours()) {
-                logWithTime('Timer déclenché - mise à jour notification et son');
-                // Mettre à jour la notification persistante avec son
-                await showPersistentNotification(true);
-            }
-        }, intervalMs);
-
-        logWithTime(`Timer en arrière-plan démarré: mise à jour toutes les ${intervalMinutes} minute(s)`);
     };
-
-    // Plus besoin de playFirstBip - le son est joué via showPersistentNotification(true)
 
     const cancelAllScheduledReminders = async () => {
         try {
-            // Annuler la notification de bip programmée
             try {
                 await Notifications.cancelScheduledNotificationAsync('next-bip');
-            } catch (error) {
-                // Ignorer si la notification n'existe pas
-            }
+            } catch (error) { }
             logWithTime('Notifications de bip annulées');
         } catch (error) {
             logWithTime(`Erreur lors de l'annulation des bips: ${error}`, 'error');
@@ -463,36 +569,24 @@ export default function App() {
     };
 
     const stopReminder = async () => {
-        // Arrêter le timer en arrière-plan
-        if (intervalRef.current) {
-            BackgroundTimer.clearInterval(intervalRef.current);
-            intervalRef.current = null;
-            logWithTime('Timer en arrière-plan arrêté');
-        }
+        // Désenregistrer la tâche en arrière-plan
+        await unregisterBackgroundTask();
 
-        // Annuler toutes les notifications de bip
         await cancelAllScheduledReminders();
 
         const PERSISTENT_NOTIFICATION_ID = 'reminder-persistent';
 
-        // Supprimer toutes les notifications persistantes
         if (notificationId) {
             try {
                 await Notifications.dismissNotificationAsync(notificationId);
-            } catch (error) {
-                // Ignorer si la notification n'existe plus
-            }
+            } catch (error) { }
             setNotificationId(null);
         }
 
-        // Annuler toutes les notifications planifiées avec cet ID
         try {
             await Notifications.cancelScheduledNotificationAsync(PERSISTENT_NOTIFICATION_ID);
-        } catch (error) {
-            // Ignorer si aucune notification n'existe
-        }
+        } catch (error) { }
 
-        // Supprimer toutes les notifications avec cet identifier
         try {
             const allNotifications = await Notifications.getAllScheduledNotificationsAsync();
             for (const notif of allNotifications) {
@@ -500,16 +594,11 @@ export default function App() {
                     await Notifications.cancelScheduledNotificationAsync(notif.identifier);
                 }
             }
-        } catch (error) {
-            // Ignorer les erreurs
-        }
+        } catch (error) { }
 
-        // Dismiss aussi au cas où
         try {
             await Notifications.dismissNotificationAsync(PERSISTENT_NOTIFICATION_ID);
-        } catch (error) {
-            // Ignorer si la notification n'existe plus
-        }
+        } catch (error) { }
     };
 
     const handleToggle = async () => {
@@ -523,22 +612,17 @@ export default function App() {
         const newPausedState = !isPaused;
         setIsPaused(newPausedState);
 
-        // Sauvegarder l'état de pause
         await saveSettings();
 
-        // Mettre à jour la notification avec le nouvel état
         if (isActive) {
             await showPersistentNotification(false, newPausedState);
         }
 
-        // Si on reprend, redémarrer immédiatement si nécessaire
         if (!newPausedState && isActive && !isInDisabledHours()) {
-            // Le son sera joué via la notification persistante
             await showPersistentNotification(true, newPausedState);
         }
     };
 
-    // Mettre à jour la ref pour le listener à chaque rendu
     handlePauseRef.current = handlePause;
 
     const handleIntervalChange = (text) => {
@@ -552,6 +636,17 @@ export default function App() {
     const handleDisableHoursChange = async () => {
         setIsDisabledHoursActive(!isDisabledHoursActive);
         await saveSettings();
+    };
+
+    // Fonction pour ouvrir les paramètres d'optimisation de batterie
+    const openBatteryOptimizationSettings = async () => {
+        if (Platform.OS === 'android') {
+            try {
+                await Linking.openSettings();
+            } catch (error) {
+                logWithTime(`Erreur lors de l'ouverture des paramètres: ${error}`, 'error');
+            }
+        }
     };
 
     return (
@@ -591,7 +686,6 @@ export default function App() {
 
                 {isActive && (
                     <>
-
                         <View style={styles.section}>
                             <View style={styles.switchContainer}>
                                 <Text style={styles.label}>Désactiver pendant certaines heures</Text>
@@ -659,12 +753,32 @@ export default function App() {
                             <Text style={styles.statusText}>
                                 Statut: {isPaused ? '⏸️ En pause' : '▶️ Actif'}
                             </Text>
+                            <Text style={styles.statusText}>
+                                Tâche arrière-plan: {backgroundTaskStatus}
+                            </Text>
                             {isInDisabledHours() && (
                                 <Text style={styles.statusText}>
                                     ⏰ Heures désactivées actives
                                 </Text>
                             )}
                         </View>
+
+                        {Platform.OS === 'android' && (
+                            <View style={styles.section}>
+                                <Text style={styles.label}>⚡ Optimisation batterie</Text>
+                                <Text style={[styles.labelHint, { marginBottom: 10 }]}>
+                                    Pour que les rappels fonctionnent avec l'écran éteint, désactivez l'optimisation de batterie pour cette app.
+                                </Text>
+                                <TouchableOpacity
+                                    style={[styles.button, { backgroundColor: '#2196F3' }]}
+                                    onPress={openBatteryOptimizationSettings}
+                                >
+                                    <Text style={styles.buttonText}>
+                                        Ouvrir les paramètres
+                                    </Text>
+                                </TouchableOpacity>
+                            </View>
+                        )}
                     </>
                 )}
             </View>
@@ -770,4 +884,3 @@ const styles = StyleSheet.create({
         marginVertical: 5,
     },
 });
-
