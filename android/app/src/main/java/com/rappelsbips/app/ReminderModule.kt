@@ -11,14 +11,13 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import com.facebook.react.bridge.ActivityEventListener
-import com.facebook.react.bridge.BaseActivityEventListener
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.WritableNativeMap
 
-class ReminderModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext) {
+class ReminderModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext), ActivityEventListener {
 
     companion object {
         const val TAG = "ReminderModule"
@@ -27,45 +26,62 @@ class ReminderModule(reactContext: ReactApplicationContext) : ReactContextBaseJa
 
     private var ringtonePickerPromise: Promise? = null
 
-    private val activityEventListener: ActivityEventListener = object : BaseActivityEventListener() {
-        override fun onActivityResult(activity: Activity?, requestCode: Int, resultCode: Int, data: Intent?) {
-            if (requestCode == RINGTONE_PICKER_REQUEST) {
-                if (resultCode == Activity.RESULT_OK && data != null) {
-                    val uri: Uri? = data.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
-                    if (uri != null) {
-                        // Sauvegarder l'URI du son sélectionné
-                        val prefs = reactApplicationContext.getSharedPreferences(ReminderService.PREFS_NAME, Context.MODE_PRIVATE)
-                        prefs.edit().putString("customSoundUri", uri.toString()).apply()
-                        
-                        // Récupérer le nom du son
-                        val ringtone = RingtoneManager.getRingtone(reactApplicationContext, uri)
-                        val title = ringtone?.getTitle(reactApplicationContext) ?: "Son personnalisé"
-                        
-                        Log.d(TAG, "Son sélectionné: $title ($uri)")
-                        ringtonePickerPromise?.resolve(title)
-                    } else {
-                        // Son par défaut sélectionné (ou silencieux)
-                        val prefs = reactApplicationContext.getSharedPreferences(ReminderService.PREFS_NAME, Context.MODE_PRIVATE)
-                        prefs.edit().remove("customSoundUri").apply()
-                        ringtonePickerPromise?.resolve("Son par défaut")
-                    }
-                } else {
-                    ringtonePickerPromise?.resolve(null) // Annulé
-                }
-                ringtonePickerPromise = null
-            }
-        }
-    }
-
     init {
-        reactContext.addActivityEventListener(activityEventListener)
+        reactContext.addActivityEventListener(this)
     }
 
     override fun getName(): String = "ReminderModule"
 
+    // Implémentation de ActivityEventListener
+    override fun onActivityResult(activity: Activity, requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode != RINGTONE_PICKER_REQUEST) return
+
+        try {
+            if (resultCode == Activity.RESULT_OK && data != null) {
+                @Suppress("DEPRECATION")
+                val uri: Uri? = data.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
+                if (uri != null) {
+                    // Sauvegarder l'URI du son sélectionné
+                    val prefs = reactApplicationContext.getSharedPreferences(
+                        ReminderService.PREFS_NAME,
+                        Context.MODE_PRIVATE
+                    )
+                    prefs.edit().putString("customSoundUri", uri.toString()).apply()
+
+                    // Récupérer le nom du son
+                    val ringtone = RingtoneManager.getRingtone(reactApplicationContext, uri)
+                    val title = ringtone?.getTitle(reactApplicationContext) ?: "Son personnalisé"
+
+                    Log.d(TAG, "Son sélectionné: $title ($uri)")
+                    ringtonePickerPromise?.resolve(title)
+                } else {
+                    // Son par défaut sélectionné (ou silencieux)
+                    val prefs = reactApplicationContext.getSharedPreferences(
+                        ReminderService.PREFS_NAME,
+                        Context.MODE_PRIVATE
+                    )
+                    prefs.edit().remove("customSoundUri").apply()
+                    ringtonePickerPromise?.resolve("Son par défaut")
+                }
+            } else {
+                // L'utilisateur a annulé le sélecteur
+                ringtonePickerPromise?.resolve(null)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Erreur dans onActivityResult: ${e.message}")
+            ringtonePickerPromise?.reject("ERROR", e.message)
+        } finally {
+            ringtonePickerPromise = null
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        // Non utilisé mais requis par l'interface
+    }
+
     @ReactMethod
     fun openRingtonePicker(promise: Promise) {
-        val activity = currentActivity
+        val activity = getCurrentActivity()
         if (activity == null) {
             promise.reject("ERROR", "Activity non disponible")
             return
@@ -90,6 +106,7 @@ class ReminderModule(reactContext: ReactApplicationContext) : ReactContextBaseJa
                 }
             }
 
+            @Suppress("DEPRECATION")
             activity.startActivityForResult(intent, RINGTONE_PICKER_REQUEST)
             Log.d(TAG, "Sélecteur de sonnerie ouvert")
         } catch (e: Exception) {
