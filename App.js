@@ -67,6 +67,7 @@ export default function App() {
         canScheduleExactAlarms: false,
         isBatteryOptimizationIgnored: false,
     });
+    const [isVibrationEnabled, setIsVibrationEnabled] = useState(true);
     const [currentSoundName, setCurrentSoundName] = useState('Son par défaut');
 
     const notificationListener = useRef(null);
@@ -86,6 +87,31 @@ export default function App() {
                 logWithTime(`Statut service: alarmes exactes=${status.canScheduleExactAlarms}, batterie ignorée=${status.isBatteryOptimizationIgnored}`);
             } catch (error) {
                 logWithTime(`Erreur lors de la vérification du statut: ${error}`, 'error');
+            }
+        }
+    };
+
+    // Charger l'état de la vibration depuis le module natif
+    const loadVibrationSetting = async () => {
+        if (Platform.OS === 'android' && ReminderModule) {
+            try {
+                const enabled = await ReminderModule.getVibrationEnabled();
+                setIsVibrationEnabled(!!enabled);
+            } catch (error) {
+                logWithTime(`Erreur lors du chargement de la vibration: ${error}`, 'error');
+            }
+        }
+    };
+
+    const toggleVibration = async () => {
+        if (Platform.OS === 'android' && ReminderModule) {
+            try {
+                const newValue = !isVibrationEnabled;
+                setIsVibrationEnabled(newValue);
+                await ReminderModule.setVibrationEnabled(newValue);
+            } catch (error) {
+                logWithTime(`Erreur lors de la mise à jour de la vibration: ${error}`, 'error');
+                Alert.alert('Erreur', 'Impossible de modifier la vibration');
             }
         }
     };
@@ -130,6 +156,9 @@ export default function App() {
 
             // Vérifier le statut du service natif
             await checkServiceStatus();
+
+            // Charger l'état de la vibration
+            await loadVibrationSetting();
 
             // Charger le nom du son actuel
             await loadCurrentSoundName();
@@ -510,6 +539,21 @@ export default function App() {
                                     <Text style={styles.labelHint}>
                                         Appuyez pour choisir une sonnerie personnalisée
                                     </Text>
+
+                                    <View style={[styles.switchContainer, { marginTop: 15 }]}>
+                                        <View style={styles.labelContainer}>
+                                            <Text style={styles.label}>Vibration</Text>
+                                            <Text style={styles.labelHint}>
+                                                Active ou désactive la vibration à chaque bip
+                                            </Text>
+                                        </View>
+                                        <Switch
+                                            value={isVibrationEnabled}
+                                            onValueChange={toggleVibration}
+                                            trackColor={{ false: '#767577', true: '#81b0ff' }}
+                                            thumbColor={isVibrationEnabled ? '#f5dd4b' : '#f4f3f4'}
+                                        />
+                                    </View>
                                 </>
                             )}
                         </>

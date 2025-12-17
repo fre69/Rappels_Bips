@@ -137,6 +137,31 @@ class ReminderModule(reactContext: ReactApplicationContext) : ReactContextBaseJa
     }
 
     @ReactMethod
+    fun setVibrationEnabled(enabled: Boolean, promise: Promise) {
+        try {
+            val prefs = reactApplicationContext.getSharedPreferences(ReminderService.PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putBoolean("isVibrationEnabled", enabled).apply()
+            Log.d(TAG, "Vibration mise à jour: $enabled")
+            promise.resolve(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Erreur lors de la mise à jour de la vibration: ${e.message}")
+            promise.reject("ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun getVibrationEnabled(promise: Promise) {
+        try {
+            val prefs = reactApplicationContext.getSharedPreferences(ReminderService.PREFS_NAME, Context.MODE_PRIVATE)
+            val enabled = prefs.getBoolean("isVibrationEnabled", true)
+            promise.resolve(enabled)
+        } catch (e: Exception) {
+            Log.e(TAG, "Erreur lors de la lecture de la vibration: ${e.message}")
+            promise.resolve(true)
+        }
+    }
+
+    @ReactMethod
     fun startService(intervalMinutes: Int, promise: Promise) {
         try {
             Log.d(TAG, "Démarrage du service avec intervalle de $intervalMinutes minutes")

@@ -55,6 +55,10 @@ class ReminderService : Service() {
         super.onCreate()
         Log.d(TAG, "=== SERVICE CRÉÉ ===")
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        // Valeur par défaut pour la vibration si non encore définie
+        if (!prefs.contains("isVibrationEnabled")) {
+            prefs.edit().putBoolean("isVibrationEnabled", true).apply()
+        }
         handler = Handler(Looper.getMainLooper())
         createNotificationChannels()
     }
@@ -425,27 +429,32 @@ class ReminderService : Service() {
             }
         }
 
-        // Vibrer
-        try {
-            val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
-                vibratorManager.defaultVibrator
-            } else {
-                @Suppress("DEPRECATION")
-                getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+        // Vibrer (si activé dans les préférences)
+        val isVibrationEnabled = prefs.getBoolean("isVibrationEnabled", true)
+        if (isVibrationEnabled) {
+            try {
+                val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+                    vibratorManager.defaultVibrator
+                } else {
+                    @Suppress("DEPRECATION")
+                    getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+                }
+                
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vibrator.vibrate(
+                        VibrationEffect.createWaveform(longArrayOf(0, 300, 200, 300, 200, 300), -1)
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator.vibrate(longArrayOf(0, 300, 200, 300, 200, 300), -1)
+                }
+                Log.d(TAG, "Vibration effectuée")
+            } catch (e: Exception) {
+                Log.e(TAG, "Erreur lors de la vibration: ${e.message}")
             }
-            
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                vibrator.vibrate(
-                    VibrationEffect.createWaveform(longArrayOf(0, 300, 200, 300, 200, 300), -1)
-                )
-            } else {
-                @Suppress("DEPRECATION")
-                vibrator.vibrate(longArrayOf(0, 300, 200, 300, 200, 300), -1)
-            }
-            Log.d(TAG, "Vibration effectuée")
-        } catch (e: Exception) {
-            Log.e(TAG, "Erreur lors de la vibration: ${e.message}")
+        } else {
+            Log.d(TAG, "Vibration désactivée par l'utilisateur")
         }
     }
 
