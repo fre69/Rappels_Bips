@@ -9,8 +9,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
-import android.media.AudioAttributes
 import android.media.RingtoneManager
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -30,7 +30,6 @@ class ReminderService : Service() {
     companion object {
         const val TAG = "ReminderService"
         const val CHANNEL_ID = "reminder_service_channel"
-        const val ALERT_CHANNEL_ID = "reminder_alerts"
         const val NOTIFICATION_ID = 1001
         const val PREFS_NAME = "ReminderPrefs"
         
@@ -146,7 +145,21 @@ class ReminderService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val notificationManager = getSystemService(NotificationManager::class.java)
             
-            // Canal pour la notification permanente (silencieux)
+            // Supprimer les anciens canaux non utilisés
+            val oldChannels = listOf(
+                "reminder_alerts",      // Ancien canal d'alertes
+                "reminders",            // Ancien canal Expo
+            )
+            oldChannels.forEach { channelId ->
+                try {
+                    notificationManager.deleteNotificationChannel(channelId)
+                    Log.d(TAG, "Ancien canal supprimé: $channelId")
+                } catch (e: Exception) {
+                    // Ignorer si le canal n'existe pas
+                }
+            }
+            
+            // Canal pour la notification permanente (silencieux - le son est joué séparément)
             val serviceChannel = NotificationChannel(
                 CHANNEL_ID,
                 "Service de rappels",
@@ -158,28 +171,7 @@ class ReminderService : Service() {
             }
             notificationManager.createNotificationChannel(serviceChannel)
             
-            // Canal pour les alertes sonores (haute priorité)
-            val alertChannel = NotificationChannel(
-                ALERT_CHANNEL_ID,
-                "Alertes de rappels",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Notifications sonores pour les rappels"
-                enableVibration(true)
-                vibrationPattern = longArrayOf(0, 250, 250, 250)
-                setSound(
-                    RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION),
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_ALARM)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                        .build()
-                )
-                setBypassDnd(true)
-                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-            }
-            notificationManager.createNotificationChannel(alertChannel)
-            
-            Log.d(TAG, "Canaux de notification créés")
+            Log.d(TAG, "Canal de notification créé")
         }
     }
 
@@ -353,7 +345,8 @@ class ReminderService : Service() {
             // Vérifier qu'on n'est pas en pause et pas dans les heures désactivées
             if (!isPaused && !isInDisabledHours()) {
                 playAlarmSound()
-                showAlertNotification()
+                // Note: On ne crée plus de notification d'alerte séparée
+                // Seule la notification permanente est mise à jour
                 lastAlarmTime = System.currentTimeMillis()
             } else {
                 Log.d(TAG, "Alarme ignorée: pause=$isPaused, heuresDesactivees=${isInDisabledHours()}")
@@ -396,17 +389,40 @@ class ReminderService : Service() {
         Log.d(TAG, "🔊 Lecture du son d'alarme")
         
         try {
-            val ringtone = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-            val r = RingtoneManager.getRingtone(applicationContext, ringtone)
-            
-            // Configuration pour jouer le son même en mode silencieux
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                r.isLooping = false
+            // Récupérer le son personnalisé ou utiliser le son par défaut
+            val customSoundUri = prefs.getString("customSoundUri", null)
+            val soundUri: Uri = if (customSoundUri != null) {
+                Uri.parse(customSoundUri)
+            } else {
+                RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
             }
-            r.play()
-            Log.d(TAG, "Son joué avec succès")
+            
+            val r = RingtoneManager.getRingtone(applicationContext, soundUri)
+            
+            if (r != null) {
+                // Configuration pour jouer le son même en mode silencieux
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    r.isLooping = false
+                }
+                r.play()
+                Log.d(TAG, "Son joué avec succès: $soundUri")
+            } else {
+                // Fallback au son par défaut si le son personnalisé n'est pas disponible
+                Log.w(TAG, "Son personnalisé non disponible, utilisation du son par défaut")
+                val defaultUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                val defaultRingtone = RingtoneManager.getRingtone(applicationContext, defaultUri)
+                defaultRingtone?.play()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Erreur lors de la lecture du son: ${e.message}")
+            // Tentative avec le son par défaut en cas d'erreur
+            try {
+                val defaultUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                val defaultRingtone = RingtoneManager.getRingtone(applicationContext, defaultUri)
+                defaultRingtone?.play()
+            } catch (e2: Exception) {
+                Log.e(TAG, "Erreur lors de la lecture du son par défaut: ${e2.message}")
+            }
         }
 
         // Vibrer
@@ -431,32 +447,6 @@ class ReminderService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "Erreur lors de la vibration: ${e.message}")
         }
-    }
-
-    private fun showAlertNotification() {
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
-        }
-        val pendingIntent = PendingIntent.getActivity(
-            this, 2, intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
-            .setContentTitle("🔔 Rappel!")
-            .setContentText("Bip de rappel - ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())}")
-            .setSmallIcon(android.R.drawable.ic_popup_reminder)
-            .setContentIntent(pendingIntent)
-            .setAutoCancel(true)
-            .setPriority(NotificationCompat.PRIORITY_MAX)
-            .setCategory(NotificationCompat.CATEGORY_ALARM)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setDefaults(NotificationCompat.DEFAULT_ALL)
-            .setFullScreenIntent(pendingIntent, true) // Pour réveiller l'écran
-            .build()
-
-        val notificationManager = getSystemService(NotificationManager::class.java)
-        notificationManager.notify(System.currentTimeMillis().toInt(), notification)
     }
 
     private fun isInDisabledHours(): Boolean {

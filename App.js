@@ -67,6 +67,7 @@ export default function App() {
         canScheduleExactAlarms: false,
         isBatteryOptimizationIgnored: false,
     });
+    const [currentSoundName, setCurrentSoundName] = useState('Son par défaut');
 
     const notificationListener = useRef(null);
     const responseListener = useRef(null);
@@ -89,35 +90,49 @@ export default function App() {
         }
     };
 
+    // Charger le nom du son actuel
+    const loadCurrentSoundName = async () => {
+        if (Platform.OS === 'android' && ReminderModule) {
+            try {
+                const soundName = await ReminderModule.getCurrentSoundName();
+                setCurrentSoundName(soundName || 'Son par défaut');
+            } catch (error) {
+                logWithTime(`Erreur lors du chargement du son: ${error}`, 'error');
+            }
+        }
+    };
+
+    // Ouvrir le sélecteur de son
+    const openSoundPicker = async () => {
+        if (Platform.OS === 'android' && ReminderModule) {
+            try {
+                const result = await ReminderModule.openRingtonePicker();
+                if (result) {
+                    setCurrentSoundName(result);
+                    logWithTime(`Son sélectionné: ${result}`);
+                }
+            } catch (error) {
+                logWithTime(`Erreur lors de la sélection du son: ${error}`, 'error');
+                Alert.alert('Erreur', 'Impossible d\'ouvrir le sélecteur de sonneries');
+            }
+        }
+    };
+
     useEffect(() => {
         const initialize = async () => {
             await loadSettings();
 
-            // Configurer le canal de notification Android (pour les notifications Expo)
-            if (Platform.OS === 'android') {
-                try {
-                    await Notifications.setNotificationChannelAsync('reminders', {
-                        name: 'Rappels',
-                        description: 'Notifications de rappels',
-                        importance: Notifications.AndroidImportance.HIGH,
-                        vibrationPattern: [0, 250, 250, 250],
-                        lightColor: '#FF231F7C',
-                        enableVibrate: true,
-                        showBadge: false,
-                        sound: 'default',
-                        enableLights: true,
-                    });
-                    logWithTime('Canal de notification créé');
-                } catch (error) {
-                    logWithTime(`Erreur lors de la création du canal: ${error}`, 'error');
-                }
-            }
+            // Note: Les canaux de notification sont maintenant gérés par le service natif Android
+            // (ReminderService.kt) - pas besoin de les créer ici
 
             // Demander les permissions de notification
             await registerForPushNotificationsAsync();
 
             // Vérifier le statut du service natif
             await checkServiceStatus();
+
+            // Charger le nom du son actuel
+            await loadCurrentSoundName();
 
             // Écouter les notifications
             notificationListener.current = Notifications.addNotificationReceivedListener(
@@ -478,6 +493,25 @@ export default function App() {
                                 keyboardType="numeric"
                                 placeholder="15"
                             />
+
+                            {Platform.OS === 'android' && (
+                                <>
+                                    <View style={styles.divider} />
+                                    <Text style={styles.label}>🔔 Son de rappel</Text>
+                                    <TouchableOpacity
+                                        style={styles.soundPickerButton}
+                                        onPress={openSoundPicker}
+                                    >
+                                        <Text style={styles.soundPickerText} numberOfLines={1}>
+                                            {currentSoundName}
+                                        </Text>
+                                        <Text style={styles.soundPickerIcon}>▶</Text>
+                                    </TouchableOpacity>
+                                    <Text style={styles.labelHint}>
+                                        Appuyez pour choisir une sonnerie personnalisée
+                                    </Text>
+                                </>
+                            )}
                         </>
                     )}
                 </View>
@@ -715,5 +749,25 @@ const styles = StyleSheet.create({
         fontSize: 16,
         color: '#666',
         marginVertical: 5,
+    },
+    soundPickerButton: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        borderWidth: 1,
+        borderColor: '#ddd',
+        borderRadius: 8,
+        padding: 12,
+        backgroundColor: '#f9f9f9',
+    },
+    soundPickerText: {
+        fontSize: 16,
+        color: '#333',
+        flex: 1,
+    },
+    soundPickerIcon: {
+        fontSize: 14,
+        color: '#2196F3',
+        marginLeft: 10,
     },
 });
