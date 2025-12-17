@@ -10,15 +10,13 @@ import {
     Alert,
     Platform,
     AppState,
-    Linking,
+    NativeModules,
 } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as TaskManager from 'expo-task-manager';
-import * as BackgroundFetch from 'expo-background-fetch';
 
-// Nom de la tâche en arrière-plan
-const BACKGROUND_REMINDER_TASK = 'background-reminder-task';
+// Module natif pour Android
+const { ReminderModule } = NativeModules;
 
 // Fonction helper pour les logs avec timestamp
 const logWithTime = (message, type = 'log') => {
@@ -35,130 +33,11 @@ const logWithTime = (message, type = 'log') => {
     }
 };
 
-// Helper pour vérifier si on est dans les heures désactivées (utilisé dans la tâche)
-const checkIsInDisabledHours = async () => {
-    try {
-        const isDisabledHoursActive = await AsyncStorage.getItem('isDisabledHoursActive');
-        if (isDisabledHoursActive !== 'true') return false;
-
-        const disableStartHour = parseInt(await AsyncStorage.getItem('disableStartHour')) || 22;
-        const disableEndHour = parseInt(await AsyncStorage.getItem('disableEndHour')) || 8;
-
-        const now = new Date();
-        const currentHour = now.getHours();
-
-        if (disableStartHour > disableEndHour) {
-            return currentHour >= disableStartHour || currentHour < disableEndHour;
-        } else {
-            return currentHour >= disableStartHour && currentHour < disableEndHour;
-        }
-    } catch (error) {
-        logWithTime(`Erreur lors de la vérification des heures désactivées: ${error}`, 'error');
-        return false;
-    }
-};
-
-// Helper pour jouer une notification sonore (utilisé dans la tâche en arrière-plan)
-const playBackgroundNotificationSound = async () => {
-    try {
-        const intervalMinutes = parseInt(await AsyncStorage.getItem('intervalMinutes')) || 15;
-        const isPaused = await AsyncStorage.getItem('isPaused') === 'true';
-
-        // Créer une notification pour le son
-        const soundNotificationId = `sound-${Date.now()}`;
-        await Notifications.scheduleNotificationAsync({
-            identifier: soundNotificationId,
-            content: {
-                title: '',
-                body: '',
-                data: { type: 'bip-sound' },
-                ...(Platform.OS === 'android' && {
-                    android: {
-                        channelId: 'reminders',
-                        priority: Notifications.AndroidNotificationPriority.HIGH,
-                    },
-                }),
-                sound: Platform.OS === 'ios' ? 'default' : undefined,
-            },
-            trigger: null, // Immédiat
-        });
-
-        // Mettre à jour la notification persistante
-        const PERSISTENT_NOTIFICATION_ID = 'reminder-persistent';
-        await Notifications.scheduleNotificationAsync({
-            identifier: PERSISTENT_NOTIFICATION_ID,
-            content: {
-                title: isPaused ? 'Rappel en pause' : 'Rappel actif',
-                body: isPaused
-                    ? 'Appuyez sur Reprendre pour continuer'
-                    : `Prochain bip dans ${intervalMinutes} minute(s)`,
-                data: { type: isPaused ? 'paused' : 'reminder' },
-                categoryIdentifier: 'REMINDER',
-                ...(Platform.OS === 'android' && {
-                    android: {
-                        channelId: 'reminders',
-                        priority: Notifications.AndroidNotificationPriority.HIGH,
-                        sticky: true,
-                        ongoing: true,
-                        autoCancel: false,
-                        sound: 'default',
-                        vibrate: [0, 250, 250, 250],
-                    },
-                }),
-            },
-            trigger: null,
-        });
-
-        // Supprimer la notification sonore après 2 secondes
-        setTimeout(async () => {
-            try {
-                await Notifications.dismissNotificationAsync(soundNotificationId);
-            } catch (e) { }
-        }, 2000);
-
-        logWithTime('Notification sonore jouée en arrière-plan');
-    } catch (error) {
-        logWithTime(`Erreur lors de la notification en arrière-plan: ${error}`, 'error');
-    }
-};
-
-// Définition de la tâche en arrière-plan - DOIT être en dehors du composant
-TaskManager.defineTask(BACKGROUND_REMINDER_TASK, async () => {
-    try {
-        logWithTime('Tâche en arrière-plan déclenchée');
-
-        // Vérifier si le rappel est actif
-        const isActive = await AsyncStorage.getItem('isActive') === 'true';
-        const isPaused = await AsyncStorage.getItem('isPaused') === 'true';
-
-        if (!isActive || isPaused) {
-            logWithTime('Rappel inactif ou en pause, tâche ignorée');
-            return BackgroundFetch.BackgroundFetchResult.NoData;
-        }
-
-        // Vérifier si on est dans les heures désactivées
-        const inDisabledHours = await checkIsInDisabledHours();
-        if (inDisabledHours) {
-            logWithTime('Dans les heures désactivées, tâche ignorée');
-            return BackgroundFetch.BackgroundFetchResult.NoData;
-        }
-
-        // Jouer la notification sonore
-        await playBackgroundNotificationSound();
-
-        return BackgroundFetch.BackgroundFetchResult.NewData;
-    } catch (error) {
-        logWithTime(`Erreur dans la tâche en arrière-plan: ${error}`, 'error');
-        return BackgroundFetch.BackgroundFetchResult.Failed;
-    }
-});
-
-// Configuration des notifications
+// Configuration des notifications (pour iOS ou comme fallback)
 Notifications.setNotificationHandler({
     handleNotification: async (notification) => {
         const data = notification.request.content.data;
 
-        // Si c'est une notification de bip, jouer le son mais ne pas l'afficher
         if (data?.type === 'bip-sound') {
             return {
                 shouldShowBanner: false,
@@ -168,7 +47,6 @@ Notifications.setNotificationHandler({
             };
         }
 
-        // Pour la notification permanente, afficher sans son
         return {
             shouldShowBanner: true,
             shouldShowList: true,
@@ -182,84 +60,32 @@ export default function App() {
     const [intervalMinutes, setIntervalMinutes] = useState(15);
     const [isActive, setIsActive] = useState(false);
     const [isPaused, setIsPaused] = useState(false);
-    const [notificationId, setNotificationId] = useState(null);
     const [disableStartHour, setDisableStartHour] = useState(22);
     const [disableEndHour, setDisableEndHour] = useState(8);
     const [isDisabledHoursActive, setIsDisabledHoursActive] = useState(false);
-    const [backgroundTaskStatus, setBackgroundTaskStatus] = useState('Non vérifié');
+    const [serviceStatus, setServiceStatus] = useState({
+        canScheduleExactAlarms: false,
+        isBatteryOptimizationIgnored: false,
+    });
 
     const notificationListener = useRef(null);
     const responseListener = useRef(null);
     const handlePauseRef = useRef(null);
     const wasActiveRef = useRef(false);
 
-    // Fonction pour enregistrer la tâche en arrière-plan
-    const registerBackgroundTask = async (intervalInMinutes) => {
-        try {
-            // Vérifier le statut de BackgroundFetch
-            const status = await BackgroundFetch.getStatusAsync();
-            logWithTime(`Statut BackgroundFetch: ${status}`);
-
-            if (status === BackgroundFetch.BackgroundFetchStatus.Restricted) {
-                setBackgroundTaskStatus('Restreint par le système');
-                Alert.alert(
-                    'Attention',
-                    'Les tâches en arrière-plan sont restreintes sur cet appareil. Les rappels pourraient ne pas fonctionner quand l\'écran est éteint.'
-                );
-                return false;
+    // Vérifier le statut du service natif
+    const checkServiceStatus = async () => {
+        if (Platform.OS === 'android' && ReminderModule) {
+            try {
+                const status = await ReminderModule.getStatus();
+                setServiceStatus({
+                    canScheduleExactAlarms: status.canScheduleExactAlarms,
+                    isBatteryOptimizationIgnored: status.isBatteryOptimizationIgnored,
+                });
+                logWithTime(`Statut service: alarmes exactes=${status.canScheduleExactAlarms}, batterie ignorée=${status.isBatteryOptimizationIgnored}`);
+            } catch (error) {
+                logWithTime(`Erreur lors de la vérification du statut: ${error}`, 'error');
             }
-
-            if (status === BackgroundFetch.BackgroundFetchStatus.Denied) {
-                setBackgroundTaskStatus('Refusé');
-                Alert.alert(
-                    'Permission requise',
-                    'Les tâches en arrière-plan sont désactivées. Veuillez les activer dans les paramètres de l\'application.',
-                    [
-                        { text: 'Annuler', style: 'cancel' },
-                        { text: 'Paramètres', onPress: () => Linking.openSettings() },
-                    ]
-                );
-                return false;
-            }
-
-            // Désenregistrer la tâche existante si elle existe
-            const isRegistered = await TaskManager.isTaskRegisteredAsync(BACKGROUND_REMINDER_TASK);
-            if (isRegistered) {
-                await BackgroundFetch.unregisterTaskAsync(BACKGROUND_REMINDER_TASK);
-                logWithTime('Ancienne tâche en arrière-plan désenregistrée');
-            }
-
-            // Enregistrer la nouvelle tâche
-            // Note: minimumInterval est en secondes
-            const intervalInSeconds = intervalInMinutes * 60;
-
-            await BackgroundFetch.registerTaskAsync(BACKGROUND_REMINDER_TASK, {
-                minimumInterval: intervalInSeconds,
-                stopOnTerminate: false, // Continuer même si l'app est fermée
-                startOnBoot: true, // Redémarrer après reboot
-            });
-
-            setBackgroundTaskStatus('Actif');
-            logWithTime(`Tâche en arrière-plan enregistrée avec intervalle de ${intervalInMinutes} minute(s)`);
-            return true;
-        } catch (error) {
-            logWithTime(`Erreur lors de l'enregistrement de la tâche: ${error}`, 'error');
-            setBackgroundTaskStatus(`Erreur: ${error.message}`);
-            return false;
-        }
-    };
-
-    // Fonction pour désenregistrer la tâche en arrière-plan
-    const unregisterBackgroundTask = async () => {
-        try {
-            const isRegistered = await TaskManager.isTaskRegisteredAsync(BACKGROUND_REMINDER_TASK);
-            if (isRegistered) {
-                await BackgroundFetch.unregisterTaskAsync(BACKGROUND_REMINDER_TASK);
-                logWithTime('Tâche en arrière-plan désenregistrée');
-            }
-            setBackgroundTaskStatus('Inactif');
-        } catch (error) {
-            logWithTime(`Erreur lors du désenregistrement: ${error}`, 'error');
         }
     };
 
@@ -267,12 +93,12 @@ export default function App() {
         const initialize = async () => {
             await loadSettings();
 
-            // Configurer le canal de notification Android
+            // Configurer le canal de notification Android (pour les notifications Expo)
             if (Platform.OS === 'android') {
                 try {
                     await Notifications.setNotificationChannelAsync('reminders', {
                         name: 'Rappels',
-                        description: 'Notifications de rappels sensibles au temps',
+                        description: 'Notifications de rappels',
                         importance: Notifications.AndroidImportance.HIGH,
                         vibrationPattern: [0, 250, 250, 250],
                         lightColor: '#FF231F7C',
@@ -281,7 +107,7 @@ export default function App() {
                         sound: 'default',
                         enableLights: true,
                     });
-                    logWithTime('Canal de notification "Rappels" créé');
+                    logWithTime('Canal de notification créé');
                 } catch (error) {
                     logWithTime(`Erreur lors de la création du canal: ${error}`, 'error');
                 }
@@ -290,13 +116,8 @@ export default function App() {
             // Demander les permissions de notification
             await registerForPushNotificationsAsync();
 
-            // Vérifier l'état de la tâche en arrière-plan
-            const isRegistered = await TaskManager.isTaskRegisteredAsync(BACKGROUND_REMINDER_TASK);
-            if (isRegistered) {
-                setBackgroundTaskStatus('Actif');
-            } else {
-                setBackgroundTaskStatus('Inactif');
-            }
+            // Vérifier le statut du service natif
+            await checkServiceStatus();
 
             // Écouter les notifications
             notificationListener.current = Notifications.addNotificationReceivedListener(
@@ -332,35 +153,90 @@ export default function App() {
         };
     }, []);
 
+    // Gérer les changements d'état actif/pause
     useEffect(() => {
-        if (isActive && !isPaused) {
-            const shouldPlaySound = !wasActiveRef.current;
-            wasActiveRef.current = true;
-            startReminder(shouldPlaySound);
-        } else {
-            wasActiveRef.current = false;
-            stopReminder();
-        }
+        const handleStateChange = async () => {
+            if (Platform.OS === 'android' && ReminderModule) {
+                if (isActive && !isPaused) {
+                    const shouldPlaySound = !wasActiveRef.current;
+                    wasActiveRef.current = true;
+                    await startNativeService(shouldPlaySound);
+                } else if (!isActive) {
+                    wasActiveRef.current = false;
+                    await stopNativeService();
+                }
+            }
+        };
+
+        handleStateChange();
     }, [isActive, isPaused, intervalMinutes]);
 
-    // Redémarrer quand l'app revient au premier plan
+    // Vérifier le statut quand l'app revient au premier plan
     useEffect(() => {
         const subscription = AppState.addEventListener('change', async (nextAppState) => {
-            if (nextAppState === 'active' && isActive && !isPaused) {
-                logWithTime('App revenue au premier plan - vérification de la tâche');
-                // Vérifier si la tâche est toujours enregistrée
-                const isRegistered = await TaskManager.isTaskRegisteredAsync(BACKGROUND_REMINDER_TASK);
-                if (!isRegistered && !isInDisabledHours()) {
-                    logWithTime('Tâche non enregistrée, réenregistrement...');
-                    await registerBackgroundTask(intervalMinutes);
-                }
+            if (nextAppState === 'active') {
+                logWithTime('App revenue au premier plan');
+                await checkServiceStatus();
             }
         });
 
         return () => {
             subscription.remove();
         };
-    }, [isActive, isPaused, intervalMinutes]);
+    }, []);
+
+    const startNativeService = async (playSound = true) => {
+        if (Platform.OS !== 'android' || !ReminderModule) return;
+
+        try {
+            // Mettre à jour les heures désactivées dans le service
+            await ReminderModule.updateDisabledHours(
+                isDisabledHoursActive,
+                disableStartHour,
+                disableEndHour
+            );
+
+            // Démarrer le service
+            await ReminderModule.startService(intervalMinutes);
+            logWithTime(`Service natif démarré avec intervalle de ${intervalMinutes} min`);
+        } catch (error) {
+            logWithTime(`Erreur lors du démarrage du service: ${error}`, 'error');
+            Alert.alert('Erreur', 'Impossible de démarrer le service de rappels');
+        }
+    };
+
+    const stopNativeService = async () => {
+        if (Platform.OS !== 'android' || !ReminderModule) return;
+
+        try {
+            await ReminderModule.stopService();
+            logWithTime('Service natif arrêté');
+        } catch (error) {
+            logWithTime(`Erreur lors de l'arrêt du service: ${error}`, 'error');
+        }
+    };
+
+    const pauseNativeService = async () => {
+        if (Platform.OS !== 'android' || !ReminderModule) return;
+
+        try {
+            await ReminderModule.pauseService();
+            logWithTime('Service natif en pause');
+        } catch (error) {
+            logWithTime(`Erreur lors de la pause: ${error}`, 'error');
+        }
+    };
+
+    const resumeNativeService = async () => {
+        if (Platform.OS !== 'android' || !ReminderModule) return;
+
+        try {
+            await ReminderModule.resumeService();
+            logWithTime('Service natif repris');
+        } catch (error) {
+            logWithTime(`Erreur lors de la reprise: ${error}`, 'error');
+        }
+    };
 
     const loadSettings = async () => {
         try {
@@ -415,7 +291,7 @@ export default function App() {
         if (finalStatus !== 'granted') {
             Alert.alert(
                 'Permission refusée',
-                'Les notifications sont nécessaires pour les rappels. Veuillez activer les notifications dans les paramètres de l\'application.'
+                'Les notifications sont nécessaires pour les rappels.'
             );
             return;
         }
@@ -436,215 +312,86 @@ export default function App() {
         }
     };
 
-    const showPersistentNotification = async (playSound = false, pausedState = null) => {
-        try {
-            const currentPausedState = pausedState !== null ? pausedState : isPaused;
-
-            await updateNotificationWithActions(currentPausedState);
-
-            const notificationContent = {
-                title: currentPausedState ? 'Rappel en pause' : 'Rappel actif',
-                body: currentPausedState
-                    ? 'Appuyez sur Reprendre pour continuer'
-                    : `Prochain bip dans ${intervalMinutes} minute(s)`,
-                data: { type: currentPausedState ? 'paused' : 'reminder' },
-                autoDismiss: false,
-            };
-
-            notificationContent.categoryIdentifier = 'REMINDER';
-
-            if (Platform.OS === 'android') {
-                notificationContent.android = {
-                    channelId: 'reminders',
-                    priority: Notifications.AndroidNotificationPriority.HIGH,
-                    sticky: true,
-                    ongoing: true,
-                    autoCancel: false,
-                    sound: playSound ? 'default' : undefined,
-                    vibrate: playSound ? [0, 250, 250, 250] : undefined,
-                };
-            } else {
-                notificationContent.sound = playSound ? 'default' : false;
-                notificationContent.priority = Notifications.AndroidNotificationPriority.HIGH;
-                notificationContent.sticky = true;
-            }
-
-            const PERSISTENT_NOTIFICATION_ID = 'reminder-persistent';
-
-            try {
-                await Notifications.cancelScheduledNotificationAsync(PERSISTENT_NOTIFICATION_ID);
-            } catch (error) { }
-
-            try {
-                const notification = await Notifications.scheduleNotificationAsync({
-                    identifier: PERSISTENT_NOTIFICATION_ID,
-                    content: notificationContent,
-                    trigger: null,
-                });
-
-                setNotificationId(notification);
-                logWithTime(`Notification créée avec ID: ${notification}`);
-
-                if (playSound) {
-                    try {
-                        const soundNotificationId = `sound-${Date.now()}`;
-                        await Notifications.scheduleNotificationAsync({
-                            identifier: soundNotificationId,
-                            content: {
-                                title: '',
-                                body: '',
-                                data: { type: 'bip-sound' },
-                                android: {
-                                    channelId: 'reminders',
-                                    priority: Notifications.AndroidNotificationPriority.HIGH,
-                                },
-                                sound: Platform.OS === 'ios' ? 'default' : undefined,
-                            },
-                            trigger: { seconds: 1 },
-                        });
-                        setTimeout(async () => {
-                            try {
-                                await Notifications.dismissNotificationAsync(soundNotificationId);
-                                await Notifications.cancelScheduledNotificationAsync(soundNotificationId);
-                            } catch (e) { }
-                        }, 2000);
-                        logWithTime('Notification sonore programmée');
-                    } catch (soundError) {
-                        logWithTime(`Erreur lors de la notification sonore: ${soundError}`, 'error');
-                    }
-                }
-            } catch (error) {
-                logWithTime(`Erreur lors de la création de la notification: ${error}`, 'error');
-            }
-        } catch (error) {
-            logWithTime(`Erreur lors de l'affichage de la notification: ${error}`, 'error');
-        }
-    };
-
-    const updateNotificationWithActions = async (pausedState = null) => {
-        try {
-            const currentPausedState = pausedState !== null ? pausedState : isPaused;
-
-            await Notifications.setNotificationCategoryAsync('REMINDER', [
-                {
-                    identifier: 'PAUSE_ACTION',
-                    buttonTitle: currentPausedState ? 'Reprendre' : 'Pause',
-                    options: { opensAppToForeground: true },
-                },
-            ]);
-            logWithTime(`Catégorie de notification mise à jour avec action: ${currentPausedState ? 'Reprendre' : 'Pause'}`);
-        } catch (error) {
-            logWithTime(`Erreur lors de la mise à jour des actions: ${error}`, 'error');
-        }
-    };
-
-    const startReminder = async (playSound = true) => {
-        await cancelAllScheduledReminders();
-
-        if (isInDisabledHours()) {
-            logWithTime('Dans les heures désactivées, attente...');
-            await showPersistentNotification(false);
-            return;
-        }
-
-        // Afficher la notification persistante
-        await showPersistentNotification(playSound);
-
-        // Enregistrer la tâche en arrière-plan
-        const success = await registerBackgroundTask(intervalMinutes);
-        if (success) {
-            logWithTime(`Tâche en arrière-plan enregistrée pour ${intervalMinutes} minute(s)`);
-        }
-    };
-
-    const cancelAllScheduledReminders = async () => {
-        try {
-            try {
-                await Notifications.cancelScheduledNotificationAsync('next-bip');
-            } catch (error) { }
-            logWithTime('Notifications de bip annulées');
-        } catch (error) {
-            logWithTime(`Erreur lors de l'annulation des bips: ${error}`, 'error');
-        }
-    };
-
-    const stopReminder = async () => {
-        // Désenregistrer la tâche en arrière-plan
-        await unregisterBackgroundTask();
-
-        await cancelAllScheduledReminders();
-
-        const PERSISTENT_NOTIFICATION_ID = 'reminder-persistent';
-
-        if (notificationId) {
-            try {
-                await Notifications.dismissNotificationAsync(notificationId);
-            } catch (error) { }
-            setNotificationId(null);
-        }
-
-        try {
-            await Notifications.cancelScheduledNotificationAsync(PERSISTENT_NOTIFICATION_ID);
-        } catch (error) { }
-
-        try {
-            const allNotifications = await Notifications.getAllScheduledNotificationsAsync();
-            for (const notif of allNotifications) {
-                if (notif.identifier === PERSISTENT_NOTIFICATION_ID) {
-                    await Notifications.cancelScheduledNotificationAsync(notif.identifier);
-                }
-            }
-        } catch (error) { }
-
-        try {
-            await Notifications.dismissNotificationAsync(PERSISTENT_NOTIFICATION_ID);
-        } catch (error) { }
-    };
-
     const handleToggle = async () => {
         const newIsActive = !isActive;
         setIsActive(newIsActive);
         setIsPaused(false);
-        await saveSettings();
+
+        // Sauvegarder immédiatement
+        await AsyncStorage.setItem('isActive', newIsActive.toString());
+        await AsyncStorage.setItem('isPaused', 'false');
     };
 
     const handlePause = async () => {
         const newPausedState = !isPaused;
         setIsPaused(newPausedState);
 
-        await saveSettings();
+        // Sauvegarder l'état
+        await AsyncStorage.setItem('isPaused', newPausedState.toString());
 
-        if (isActive) {
-            await showPersistentNotification(false, newPausedState);
-        }
-
-        if (!newPausedState && isActive && !isInDisabledHours()) {
-            await showPersistentNotification(true, newPausedState);
+        // Contrôler le service natif
+        if (Platform.OS === 'android' && ReminderModule) {
+            if (newPausedState) {
+                await pauseNativeService();
+            } else {
+                await resumeNativeService();
+            }
         }
     };
 
     handlePauseRef.current = handlePause;
 
-    const handleIntervalChange = (text) => {
+    const handleIntervalChange = async (text) => {
         const value = parseInt(text) || 1;
         if (value > 0 && value <= 1440) {
             setIntervalMinutes(value);
-            saveSettings();
+            await AsyncStorage.setItem('intervalMinutes', value.toString());
+
+            // Mettre à jour le service si actif
+            if (Platform.OS === 'android' && ReminderModule && isActive && !isPaused) {
+                try {
+                    await ReminderModule.updateInterval(value);
+                    logWithTime(`Intervalle mis à jour: ${value} min`);
+                } catch (error) {
+                    logWithTime(`Erreur mise à jour intervalle: ${error}`, 'error');
+                }
+            }
         }
     };
 
     const handleDisableHoursChange = async () => {
-        setIsDisabledHoursActive(!isDisabledHoursActive);
-        await saveSettings();
+        const newValue = !isDisabledHoursActive;
+        setIsDisabledHoursActive(newValue);
+        await AsyncStorage.setItem('isDisabledHoursActive', newValue.toString());
+
+        // Mettre à jour le service
+        if (Platform.OS === 'android' && ReminderModule) {
+            try {
+                await ReminderModule.updateDisabledHours(newValue, disableStartHour, disableEndHour);
+            } catch (error) {
+                logWithTime(`Erreur mise à jour heures: ${error}`, 'error');
+            }
+        }
     };
 
-    // Fonction pour ouvrir les paramètres d'optimisation de batterie
-    const openBatteryOptimizationSettings = async () => {
-        if (Platform.OS === 'android') {
+    const requestExactAlarmPermission = async () => {
+        if (Platform.OS === 'android' && ReminderModule) {
             try {
-                await Linking.openSettings();
+                await ReminderModule.requestExactAlarmPermission();
+                setTimeout(checkServiceStatus, 1000);
             } catch (error) {
-                logWithTime(`Erreur lors de l'ouverture des paramètres: ${error}`, 'error');
+                logWithTime(`Erreur permission alarme: ${error}`, 'error');
+            }
+        }
+    };
+
+    const requestBatteryOptimizationExemption = async () => {
+        if (Platform.OS === 'android' && ReminderModule) {
+            try {
+                await ReminderModule.requestBatteryOptimizationExemption();
+                setTimeout(checkServiceStatus, 1000);
+            } catch (error) {
+                logWithTime(`Erreur exemption batterie: ${error}`, 'error');
             }
         }
     };
@@ -653,6 +400,57 @@ export default function App() {
         <ScrollView style={styles.container}>
             <View style={styles.content}>
                 <Text style={styles.title}>Rappels Bips</Text>
+
+                {/* Section Permissions (Android) */}
+                {Platform.OS === 'android' && (
+                    <View style={[styles.section, styles.permissionSection]}>
+                        <Text style={styles.label}>⚙️ Permissions requises</Text>
+
+                        <View style={styles.permissionItem}>
+                            <View style={styles.permissionInfo}>
+                                <Text style={styles.permissionLabel}>Alarmes exactes</Text>
+                                <Text style={[
+                                    styles.permissionStatus,
+                                    serviceStatus.canScheduleExactAlarms ? styles.statusOk : styles.statusWarning
+                                ]}>
+                                    {serviceStatus.canScheduleExactAlarms ? '✅ Autorisé' : '⚠️ Non autorisé'}
+                                </Text>
+                            </View>
+                            {!serviceStatus.canScheduleExactAlarms && (
+                                <TouchableOpacity
+                                    style={styles.permissionButton}
+                                    onPress={requestExactAlarmPermission}
+                                >
+                                    <Text style={styles.permissionButtonText}>Activer</Text>
+                                </TouchableOpacity>
+                            )}
+                        </View>
+
+                        <View style={styles.permissionItem}>
+                            <View style={styles.permissionInfo}>
+                                <Text style={styles.permissionLabel}>Optimisation batterie</Text>
+                                <Text style={[
+                                    styles.permissionStatus,
+                                    serviceStatus.isBatteryOptimizationIgnored ? styles.statusOk : styles.statusWarning
+                                ]}>
+                                    {serviceStatus.isBatteryOptimizationIgnored ? '✅ Désactivée' : '⚠️ Active'}
+                                </Text>
+                            </View>
+                            {!serviceStatus.isBatteryOptimizationIgnored && (
+                                <TouchableOpacity
+                                    style={styles.permissionButton}
+                                    onPress={requestBatteryOptimizationExemption}
+                                >
+                                    <Text style={styles.permissionButtonText}>Désactiver</Text>
+                                </TouchableOpacity>
+                            )}
+                        </View>
+
+                        <Text style={styles.permissionHint}>
+                            Ces permissions sont nécessaires pour que les rappels fonctionnent avec l'écran éteint.
+                        </Text>
+                    </View>
+                )}
 
                 <View style={styles.section}>
                     <View style={styles.switchContainer}>
@@ -703,11 +501,14 @@ export default function App() {
                                     <TextInput
                                         style={styles.input}
                                         value={disableStartHour.toString()}
-                                        onChangeText={(text) => {
+                                        onChangeText={async (text) => {
                                             const value = parseInt(text) || 0;
                                             if (value >= 0 && value <= 23) {
                                                 setDisableStartHour(value);
-                                                saveSettings();
+                                                await AsyncStorage.setItem('disableStartHour', value.toString());
+                                                if (ReminderModule) {
+                                                    await ReminderModule.updateDisabledHours(isDisabledHoursActive, value, disableEndHour);
+                                                }
                                             }
                                         }}
                                         keyboardType="numeric"
@@ -717,11 +518,14 @@ export default function App() {
                                     <TextInput
                                         style={styles.input}
                                         value={disableEndHour.toString()}
-                                        onChangeText={(text) => {
+                                        onChangeText={async (text) => {
                                             const value = parseInt(text) || 0;
                                             if (value >= 0 && value <= 23) {
                                                 setDisableEndHour(value);
-                                                saveSettings();
+                                                await AsyncStorage.setItem('disableEndHour', value.toString());
+                                                if (ReminderModule) {
+                                                    await ReminderModule.updateDisabledHours(isDisabledHoursActive, disableStartHour, value);
+                                                }
                                             }
                                         }}
                                         keyboardType="numeric"
@@ -753,32 +557,12 @@ export default function App() {
                             <Text style={styles.statusText}>
                                 Statut: {isPaused ? '⏸️ En pause' : '▶️ Actif'}
                             </Text>
-                            <Text style={styles.statusText}>
-                                Tâche arrière-plan: {backgroundTaskStatus}
-                            </Text>
                             {isInDisabledHours() && (
                                 <Text style={styles.statusText}>
                                     ⏰ Heures désactivées actives
                                 </Text>
                             )}
                         </View>
-
-                        {Platform.OS === 'android' && (
-                            <View style={styles.section}>
-                                <Text style={styles.label}>⚡ Optimisation batterie</Text>
-                                <Text style={[styles.labelHint, { marginBottom: 10 }]}>
-                                    Pour que les rappels fonctionnent avec l'écran éteint, désactivez l'optimisation de batterie pour cette app.
-                                </Text>
-                                <TouchableOpacity
-                                    style={[styles.button, { backgroundColor: '#2196F3' }]}
-                                    onPress={openBatteryOptimizationSettings}
-                                >
-                                    <Text style={styles.buttonText}>
-                                        Ouvrir les paramètres
-                                    </Text>
-                                </TouchableOpacity>
-                            </View>
-                        )}
                     </>
                 )}
             </View>
@@ -819,6 +603,55 @@ const styles = StyleSheet.create({
         shadowOpacity: 0.1,
         shadowRadius: 4,
         elevation: 3,
+    },
+    permissionSection: {
+        backgroundColor: '#fff8e1',
+        borderWidth: 1,
+        borderColor: '#ffcc02',
+    },
+    permissionItem: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        paddingVertical: 10,
+        borderBottomWidth: 1,
+        borderBottomColor: '#eee',
+    },
+    permissionInfo: {
+        flex: 1,
+    },
+    permissionLabel: {
+        fontSize: 14,
+        color: '#333',
+        fontWeight: '500',
+    },
+    permissionStatus: {
+        fontSize: 12,
+        marginTop: 2,
+    },
+    statusOk: {
+        color: '#4CAF50',
+    },
+    statusWarning: {
+        color: '#FF9800',
+    },
+    permissionButton: {
+        backgroundColor: '#2196F3',
+        paddingHorizontal: 15,
+        paddingVertical: 8,
+        borderRadius: 5,
+        marginLeft: 10,
+    },
+    permissionButtonText: {
+        color: '#fff',
+        fontSize: 12,
+        fontWeight: 'bold',
+    },
+    permissionHint: {
+        fontSize: 11,
+        color: '#666',
+        marginTop: 10,
+        fontStyle: 'italic',
     },
     switchContainer: {
         flexDirection: 'row',

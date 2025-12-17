@@ -12,11 +12,15 @@
   <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
   <!-- Permissions pour Foreground Service (nécessaire pour les tâches en arrière-plan) -->
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
   <!-- Permission pour ignorer les optimisations de batterie (Doze mode) -->
   <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
   <!-- Permission pour les alarmes exactes (Android 12+) -->
   <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+  <!-- Permission pour les alarmes (Android 13+ apps comme les alarmes/minuteries) -->
+  <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+  <!-- Permission pour les notifications (Android 13+) -->
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
   <queries>
     <intent>
       <action android:name="android.intent.action.VIEW" />
@@ -50,5 +54,27 @@
         <category android:name="android.intent.category.LAUNCHER" />
       </intent-filter>
     </activity>
+
+    <!-- Service de rappels en arrière-plan -->
+    <service
+      android:name=".ReminderService"
+      android:enabled="true"
+      android:exported="false"
+      android:foregroundServiceType="specialUse">
+      <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="alarm_timer_reminder" />
+    </service>
+
+    <!-- Receiver pour les alarmes -->
+    <receiver
+      android:name=".AlarmReceiver"
+      android:enabled="true"
+      android:exported="false">
+      <intent-filter>
+        <action android:name="com.rappelsbips.app.ACTION_ALARM_TRIGGERED" />
+        <action android:name="android.intent.action.BOOT_COMPLETED" />
+      </intent-filter>
+    </receiver>
   </application>
 </manifest>
